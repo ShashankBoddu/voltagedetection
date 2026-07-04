@@ -1,0 +1,19 @@
+{
+  "toolchainPath": "c:\\ncs\\toolchains\\66cdf9b75e",
+  "sdkPath": "c:\\ncs\\v3.2.1",
+  "board": "WrieLessPotentialDetector_Nrf52832/nrf52832",
+  "boardDir": "e:\\projects\\DevelopmentLevelCode\\NRFBOARD\\boards\\Fervid\\WrieLessPotentialDetector_Nrf52832",
+  "boardDirs": [
+    "e:\\projects\\DevelopmentLevelCode\\NRFBOARD\\boards\\Fervid\\WrieLessPotentialDetector_Nrf52832"
+  ],
+  "sysbuild": false,
+  "optimizations": "none",
+  "cmakeArgs": [],
+  "confFiles": [],
+  "buildDirectory": "build_1",
+  "kconfigFragments": [],
+  "snippets": [],
+  "dtcOverlays": [],
+  "extraDtcOverlays": [],
+  "boardRoot": "e:\\projects\\DevelopmentLevelCode\\NRFBOARD"
+}

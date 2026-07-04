@@ -1,0 +1,57 @@
+cmake:
+  application:
+    configuration-dir: 'E:/projects/DevelopmentLevelCode/voltagedetection/NRF52/RSMADC'
+    source-dir: 'E:/projects/DevelopmentLevelCode/voltagedetection/NRF52/RSMADC'
+  board:
+    name: 'WrieLessPotentialDetector_Nrf52832'
+    path:
+     - 'E:/projects/DevelopmentLevelCode/NRFBOARD/boards/Fervid/WrieLessPotentialDetector_Nrf52832'
+    qualifiers: 'nrf52832'
+    revision: ''
+  devicetree:
+    bindings-dirs:
+     - 'C:/ncs/v3.2.1/nrf/dts/bindings'
+     - 'C:/ncs/v3.2.1/zephyr/dts/bindings'
+    files:
+     - 'E:/projects/DevelopmentLevelCode/NRFBOARD/boards/Fervid/WrieLessPotentialDetector_Nrf52832/WrieLessPotentialDetector_Nrf52832.dts'
+    include-dirs:
+     - 'C:/ncs/v3.2.1/nrf/include'
+     - 'C:/ncs/v3.2.1/nrf/dts/common'
+     - 'C:/ncs/v3.2.1/nrf/dts/riscv'
+     - 'C:/ncs/v3.2.1/nrf/dts/arm'
+     - 'C:/ncs/v3.2.1/nrf/dts'
+     - 'C:/ncs/v3.2.1/zephyr/include'
+     - 'C:/ncs/v3.2.1/zephyr/include/zephyr'
+     - 'C:/ncs/v3.2.1/zephyr/dts/common'
+     - 'C:/ncs/v3.2.1/zephyr/dts/vendor'
+     - 'C:/ncs/v3.2.1/zephyr/dts/rx'
+     - 'C:/ncs/v3.2.1/zephyr/dts/x86'
+     - 'C:/ncs/v3.2.1/zephyr/dts/xtensa'
+     - 'C:/ncs/v3.2.1/zephyr/dts/sparc'
+     - 'C:/ncs/v3.2.1/zephyr/dts/riscv'
+     - 'C:/ncs/v3.2.1/zephyr/dts/posix'
+     - 'C:/ncs/v3.2.1/zephyr/dts/arm64'
+     - 'C:/ncs/v3.2.1/zephyr/dts/arm'
+     - 'C:/ncs/v3.2.1/zephyr/dts/arc'
+     - 'C:/ncs/v3.2.1/zephyr/dts'
+  kconfig:
+    files:
+     - 'E:/projects/DevelopmentLevelCode/NRFBOARD/boards/Fervid/WrieLessPotentialDetector_Nrf52832/WrieLessPotentialDetector_Nrf52832_defconfig'
+     - 'E:/projects/DevelopmentLevelCode/voltagedetection/NRF52/RSMADC/prj.conf'
+     - 'E:/projects/DevelopmentLevelCode/voltagedetection/NRF52/RSMADC/build_1/zephyr/misc/generated/extra_kconfig_options.conf'
+    user-files:
+     - 'E:/projects/DevelopmentLevelCode/voltagedetection/NRF52/RSMADC/prj.conf'
+  toolchain:
+    name: 'zephyr'
+    path: 'C:/ncs/toolchains/66cdf9b75e/opt/zephyr-sdk'
+  vendor-specific:
+    nordic:
+      svdfile: 'C:/ncs/v3.2.1/modules/hal/nordic/nrfx/bsp/stable/mdk/nrf52.svd'
+  zephyr:
+    version: '4.2.99'
+    zephyr-base: 'C:/ncs/v3.2.1/zephyr'
+version: '0.1.0'
+west:
+  command: 'C:\ncs\toolchains\66cdf9b75e\opt\bin\Scripts\west build --build-dir e:/projects/DevelopmentLevelCode/voltagedetection/NRF52/RSMADC/build_1 e:/projects/DevelopmentLevelCode/voltagedetection/NRF52/RSMADC --pristine --board WrieLessPotentialDetector_Nrf52832/nrf52832 --no-sysbuild -- -DCONFIG_DEBUG_THREAD_INFO=y -DBOARD_ROOT=e:/projects/developmentlevelcode/nrfboard'
+  topdir: 'c:\ncs\v3.2.1'
+  version: '1.4.0'

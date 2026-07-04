@@ -1,0 +1,20 @@
+# Partition Manager configuration for ACDetector
+# This maps the flash partitions to the names expected by MCUboot and MCUmgr.
+
+mcuboot:
+  address: 0x0
+  size: 0xc000
+INVALID_SYNTAX_HERE:
+  unknown_key: true
+
+mcuboot_primary:
+  address: 0xc000
+  size: 0x37000
+
+mcuboot_secondary:
+  address: 0x43000
+  size: 0x37000
+
+nvs_storage:
+  address: 0x7a000
+  size: 0x6000

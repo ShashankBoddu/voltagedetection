@@ -1,0 +1,111 @@
+# ===============================
+# Build directories
+# ===============================
+build/
+_build/
+cmake-build-*/
+out/
+
+# ===============================
+# Zephyr generated files
+# ===============================
+zephyr/.config
+zephyr/.config.old
+zephyr/include/generated/
+zephyr/zephyr.dts
+zephyr/zephyr.dts.pre
+zephyr/zephyr.elf
+zephyr/zephyr.hex
+zephyr/zephyr.bin
+zephyr/zephyr.map
+zephyr/zephyr.lst
+zephyr/zephyr.stat
+
+# ===============================
+# CMake
+# ===============================
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+build.ninja
+.ninja_*
+rules.ninja
+
+# ===============================
+# Ninja
+# ===============================
+.ninja_log
+.ninja_deps
+
+# ===============================
+# West
+# ===============================
+.west/
+
+# ===============================
+# VS Code
+# ===============================
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# ===============================
+# Eclipse
+# ===============================
+.project
+.cproject
+.settings/
+
+# ===============================
+# CLion
+# ===============================
+.idea/
+
+# ===============================
+# Visual Studio
+# ===============================
+.vs/
+
+# ===============================
+# OS files
+# ===============================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===============================
+# Python
+# ===============================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# ===============================
+# Logs
+# ===============================
+*.log
+
+# ===============================
+# Backup files
+# ===============================
+*.bak
+*.orig
+*.tmp
+*.swp
+*~
+
+# ===============================
+# J-Link
+# ===============================
+JLinkLog.txt
+JLinkDevices.xml
+
+# ===============================
+# SEGGER RTT
+# ===============================
+SEGGER_RTT_Viewer.ini
