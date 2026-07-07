@@ -36,7 +36,15 @@ int main(void) {
 
   /* Boot Buzzer Notification (0.5s) */
   buzzer_set(true);
-  k_sleep(K_MSEC(500));
+  k_sleep(K_MSEC(400));
+  buzzer_set(false);
+  k_sleep(K_MSEC(200));
+  buzzer_set(true);
+  k_sleep(K_MSEC(400));
+  buzzer_set(false);
+  k_sleep(K_MSEC(200));
+  buzzer_set(true);
+  k_sleep(K_MSEC(400));
   buzzer_set(false);
 
   printk("ACDetector Initialized. Releasing threads.\n");

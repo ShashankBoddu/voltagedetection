@@ -64,7 +64,7 @@ static void start_advertising(void) {
   } else {
     printk("Advertising started\n");
   }
-  gpio_pin_set_dt(&ble_led_spec, 0);
+  
 }
 
 static void connected(struct bt_conn *conn, uint8_t err) {
@@ -74,7 +74,7 @@ static void connected(struct bt_conn *conn, uint8_t err) {
   }
   printk("BLE connected\n");
 
-  gpio_pin_set_dt(&ble_led_spec, 1);
+  gpio_pin_set_dt(&ble_led_spec, 0);
 
   if (current_conn) {
     bt_conn_unref(current_conn);
@@ -84,7 +84,7 @@ static void connected(struct bt_conn *conn, uint8_t err) {
 
 static void disconnected(struct bt_conn *conn, uint8_t reason) {
   printk("BLE disconnected (reason %u)\n", reason);
-  gpio_pin_set_dt(&ble_led_spec, 0);
+  gpio_pin_set_dt(&ble_led_spec, 1);
 
   if (current_conn == conn) {
     bt_conn_unref(current_conn);
@@ -242,7 +242,7 @@ void ble_param_init(void) {
   if (gpio_is_ready_dt(&ble_led_spec)) {
     gpio_pin_configure_dt(&ble_led_spec, GPIO_OUTPUT_INACTIVE);
   }
-
+  gpio_pin_set_dt(&ble_led_spec, 1);
 }
 
 /* ================= TX Thread ================= */

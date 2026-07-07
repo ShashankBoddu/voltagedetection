@@ -52,8 +52,12 @@ static struct adc_sequence seq_bat = {
 static const struct device *adc_dev = DEVICE_DT_GET(DT_NODELABEL(adc));
 static const struct gpio_dt_spec buzzer_spec =
     GPIO_DT_SPEC_GET(DT_NODELABEL(buzzer), gpios);
+
 static const struct gpio_dt_spec DetectionLed_spec =
-    GPIO_DT_SPEC_GET(DT_NODELABEL(blemode), gpios);
+    GPIO_DT_SPEC_GET(DT_NODELABEL(lowbat), gpios);
+
+// static const struct gpio_dt_spec ble_led_spec =
+//     GPIO_DT_SPEC_GET(DT_NODELABEL(blemode), gpios);
 data_t g_data;
 thresholds_t g_thresholds;
 
@@ -141,6 +145,13 @@ void adc_param_init(void) {
     printk("Buzzer GPIO ready\n");
   } else {
     printk("Error: Buzzer GPIO not ready\n");
+  }
+
+  if (gpio_is_ready_dt(&DetectionLed_spec)) {
+    gpio_pin_configure_dt(&DetectionLed_spec, GPIO_OUTPUT_INACTIVE);
+    printk("Detection LED (LOWBAT) GPIO ready\n");
+  } else {
+    printk("Error: Detection LED (LOWBAT) GPIO not ready\n");
   }
 
   // Use the board's DeviceTree to configure the channels correctly,
