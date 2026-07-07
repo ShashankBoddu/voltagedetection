@@ -15,7 +15,7 @@ from smpclient.requests.os_management import ResetWrite
 # Default device name from prj.conf
 DEFAULT_DEVICE_NAME = "AC_DETECTOR"
 # Default firmware path
-DEFAULT_FILE_PATH = r"E:\projects\DevelopmentLevelCode\voltagedetection\NRF52\ACDetector\build\ACDetector\zephyr\zephyr.signed.bin"
+DEFAULT_FILE_PATH = r"D:\projects\Devlopment_codes\NRF\voltagedetection\ACDetector\zephyr\zephyr.signed.bin"
 
 async def find_device(name):
     print(f"Scanning for BLE device with name '{name}'...")

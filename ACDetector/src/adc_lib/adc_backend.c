@@ -52,6 +52,8 @@ static struct adc_sequence seq_bat = {
 static const struct device *adc_dev = DEVICE_DT_GET(DT_NODELABEL(adc));
 static const struct gpio_dt_spec buzzer_spec =
     GPIO_DT_SPEC_GET(DT_NODELABEL(buzzer), gpios);
+static const struct gpio_dt_spec DetectionLed_spec =
+    GPIO_DT_SPEC_GET(DT_NODELABEL(blemode), gpios);
 data_t g_data;
 thresholds_t g_thresholds;
 
@@ -60,6 +62,9 @@ K_MUTEX_DEFINE(data_mutex);
 void buzzer_set(bool on) {
   if (gpio_is_ready_dt(&buzzer_spec)) {
     gpio_pin_set_dt(&buzzer_spec, on ? 1 : 0);
+  }
+  if (gpio_is_ready_dt(&DetectionLed_spec)) {
+    gpio_pin_set_dt(&DetectionLed_spec, on ? 1 : 0);
   }
 }
 
@@ -246,6 +251,9 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
       printk("Line Detector Status: %d\n", g_data.Line_detector_Status);
       if (gpio_is_ready_dt(&buzzer_spec)) {
         gpio_pin_set_dt(&buzzer_spec, g_data.Line_detector_Status);
+      }
+      if (gpio_is_ready_dt(&DetectionLed_spec)) {
+        gpio_pin_set_dt(&DetectionLed_spec, g_data.Line_detector_Status);
       }
       AVGblc_mean_mv = 0;
       AVGblc_rms_mv = 0;

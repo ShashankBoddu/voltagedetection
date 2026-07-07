@@ -7,7 +7,7 @@
 /* ================= Data Micro ================= */
 #define SAMPLE_COUNT 200
 #define ADC_PERIOD_MS 10
-#define ADC_AVG_COUNT 3
+#define ADC_AVG_COUNT 15
 #define SAMPLES_PER_PKT 8
 #define ADC_LSB_uV 879
 // Ratio: (100k + 47k) / 47k = 147 / 47
