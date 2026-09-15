@@ -11,9 +11,9 @@
 #include "storage_lib/storage_backend.h"
 
 /* Define threads here to ensure they are created at boot */
-K_THREAD_DEFINE(ble_thread_id, 1024, ble_tx_thread_fn, NULL, NULL, NULL, 9, 0,
+K_THREAD_DEFINE(ble_thread_id, 2048, ble_tx_thread_fn, NULL, NULL, NULL, 9, 0,
                 0);
-K_THREAD_DEFINE(adc_thread, 1024, adc_thread_fn, NULL, NULL, NULL, 8, 0, 0);
+K_THREAD_DEFINE(adc_thread, 2048, adc_thread_fn, NULL, NULL, NULL, 8, 0, 0);
 
 K_SEM_DEFINE(boot_done_sem, 0, 10);
 

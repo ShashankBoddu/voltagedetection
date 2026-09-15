@@ -201,7 +201,12 @@ void ble_send(const char *data, uint16_t len) {
   if (!notify_enabled || !tx_attr) {
     return;
   }
-  bt_gatt_notify(NULL, tx_attr, data, len);
+  int err = bt_gatt_notify(NULL, tx_attr, data, len);
+  if (err == -ENOMEM) {
+    // Retry once after brief delay if BLE controller buffers are momentarily congested
+    k_sleep(K_MSEC(10));
+    bt_gatt_notify(NULL, tx_attr, data, len);
+  }
 }
 
 /* ================= Public Functions ================= */

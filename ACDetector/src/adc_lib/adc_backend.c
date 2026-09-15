@@ -22,6 +22,8 @@ static struct adc_sequence_options seq_opts_bat = {
 
 int16_t adc_blc_buf[SAMPLE_COUNT];
 int16_t adc_alc_buf[SAMPLE_COUNT];
+static int16_t published_blc_buf[SAMPLE_COUNT];
+static int16_t published_alc_buf[SAMPLE_COUNT];
 static int16_t adc_bat_buf[16];
 
 static struct adc_sequence seq_blc = {
@@ -244,6 +246,8 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
     }
 
     k_mutex_lock(&data_mutex, K_FOREVER);
+    memcpy(published_blc_buf, adc_blc_buf, sizeof(adc_blc_buf));
+    memcpy(published_alc_buf, adc_alc_buf, sizeof(adc_alc_buf));
 
     int32_t bat_sum = 0;
     for (int i = 0; i < 16; i++) {
@@ -371,10 +375,10 @@ void adc_get_snapshot(data_t *p_data, int16_t *p_blc, int16_t *p_alc) {
     *p_data = g_data;
   }
   if (p_blc) {
-    memcpy(p_blc, adc_blc_buf, sizeof(adc_blc_buf));
+    memcpy(p_blc, published_blc_buf, sizeof(published_blc_buf));
   }
   if (p_alc) {
-    memcpy(p_alc, adc_alc_buf, sizeof(adc_alc_buf));
+    memcpy(p_alc, published_alc_buf, sizeof(published_alc_buf));
   }
   k_mutex_unlock(&data_mutex);
 }

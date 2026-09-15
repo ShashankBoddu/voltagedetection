@@ -7,15 +7,15 @@
 
 static thresholds_t *loaded_thresholds;
 
-// Default values for a single channel
+// Default values for a single channel (Calibrated: 35mV BLC, 25mV ALC)
 static const channel_thresholds_t default_channel = {.blc_mean_min = 100,
                                                      .blc_mean_max = 2000,
-                                                     .blc_rms_min = 0,
+                                                     .blc_rms_min = 35,
                                                      .blc_rms_max = 500,
 
                                                      .alc_mean_min = 100,
                                                      .alc_mean_max = 2000,
-                                                     .alc_rms_min = 45,
+                                                     .alc_rms_min = 25,
                                                      .alc_rms_max = 3000};
 
 static int threshold_handle_set(const char *name, size_t len,

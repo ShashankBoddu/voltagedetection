@@ -58,8 +58,12 @@ void range_param_init(void) {
     }
   }
 
-  // Default to channel 0
-  range_set(0);
+  // Read physical rotary switch immediately, fallback to channel 0 if in transition
+  current_channel = 0xFF;
+  range_update_manual();
+  if (current_channel == 0xFF) {
+    range_set(0);
+  }
 }
 
 void range_set(uint8_t channel) {
@@ -81,12 +85,17 @@ uint8_t range_get(void) { return current_channel; }
 
 void range_process_cmd(const char *cmd, uint16_t len) {
   // CMD Format: "S<VoltageString>"
-
   if (len < 2 || cmd[0] != 'S')
     return;
 
-  const char *voltage = cmd + 1;
-  uint16_t v_len = len - 1;
+  // Copy into safe null-terminated buffer to prevent out-of-bounds reads in atoi/printk
+  char safe_cmd[16];
+  uint16_t copy_len = (len < sizeof(safe_cmd) - 1) ? len : (sizeof(safe_cmd) - 1);
+  memcpy(safe_cmd, cmd, copy_len);
+  safe_cmd[copy_len] = '\0';
+
+  const char *voltage = safe_cmd + 1;
+  uint16_t v_len = copy_len - 1;
 
 // Helper macro to check string match safely
 #define MATCH(str)                                                             \
@@ -118,9 +127,11 @@ void range_process_cmd(const char *cmd, uint16_t len) {
     range_set(11);
   } else if (voltage[0] == '#') {
     int ch = atoi(voltage + 1);
-    range_set((uint8_t)ch);
+    if (ch >= 0 && ch <= 15) {
+      range_set((uint8_t)ch);
+    }
   } else {
-    printk("Unknown Range Command: %s\n", cmd);
+    printk("Unknown Range Command: %s\n", safe_cmd);
   }
 
 #undef MATCH
