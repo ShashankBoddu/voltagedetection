@@ -7,12 +7,12 @@
 /* ================= Data Micro ================= */
 #define SAMPLE_COUNT 200
 #define ADC_PERIOD_MS 10
-#define ADC_AVG_COUNT 15
+#define ADC_AVG_COUNT 8
 #define SAMPLES_PER_PKT 8
 #define ADC_LSB_uV 879
-// Ratio: (100k + 47k) / 47k = 147 / 47
-#define BATTERY_SCALE_MUL 147
-#define BATTERY_SCALE_DIV 47
+// Calibrated ratio for 1M + 300k divider (8830mV output target): 1308 / 300
+#define BATTERY_SCALE_MUL 1308
+#define BATTERY_SCALE_DIV 300
 
 /* ================= Data Enum ================= */
 enum pkt_type {
@@ -42,14 +42,20 @@ typedef struct {
   channel_thresholds_t channels[16];
 } thresholds_t;
 
+/* ================= Line Detector Status Enum ================= */
+#define STATUS_SAFE 0
+#define STATUS_LIVE 1
+#define STATUS_INDUCED 2
+
 typedef struct {
   int32_t blc_mean_mv;
   int32_t blc_rms_mv;
   int32_t alc_mean_mv;
   int32_t alc_rms_mv;
   int32_t battery_mv;
+  int32_t induced_voltage_mv;
   uint8_t battery_percent;
-  bool Line_detector_Status;
+  uint8_t Line_detector_Status;
   uint8_t selected_range;
 } data_t;
 

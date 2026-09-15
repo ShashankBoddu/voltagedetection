@@ -15,14 +15,14 @@ static struct adc_sequence_options seq_opts_200 = {
     .extra_samplings = SAMPLE_COUNT - 1,
 };
 
-static struct adc_sequence_options seq_opts_2 = {
+static struct adc_sequence_options seq_opts_bat = {
     .interval_us = 100,
-    .extra_samplings = 1,
+    .extra_samplings = 15,
 };
 
 int16_t adc_blc_buf[SAMPLE_COUNT];
 int16_t adc_alc_buf[SAMPLE_COUNT];
-static int16_t adc_bat_buf[2];
+static int16_t adc_bat_buf[16];
 
 static struct adc_sequence seq_blc = {
     .options = &seq_opts_200,
@@ -41,7 +41,7 @@ static struct adc_sequence seq_alc = {
 };
 
 static struct adc_sequence seq_bat = {
-    .options = &seq_opts_2,
+    .options = &seq_opts_bat,
     .channels = BIT(5), // P0.29 / AIN5
     .buffer = adc_bat_buf,
     .buffer_size = sizeof(adc_bat_buf),
@@ -106,7 +106,6 @@ static void calc_mean_rms_p2p_mV(int16_t *buf, int count, int32_t *mean_mV,
   int64_t sq = 0;
   int16_t min = buf[0];
   int16_t max = buf[0];
-
   /* ---------- First pass: mean, min, max ---------- */
   for (int i = 0; i < count; i++) {
     sum += buf[i];
@@ -131,6 +130,36 @@ static void calc_mean_rms_p2p_mV(int16_t *buf, int count, int32_t *mean_mV,
   *mean_mV = (mean_counts * ADC_LSB_uV) / 1000;
   *rms_mV = (rms_counts * ADC_LSB_uV) / 1000;
   *p2p_mV = (p2p_counts * ADC_LSB_uV) / 1000;
+}
+
+/* ---------- 50Hz Fundamental Power Frequency Filter (Goertzel) ---------- */
+static int32_t calc_50hz_fundamental_rms_mV(int16_t *buf, int count) {
+  // First pass: Calculate mean (DC offset removal)
+  int64_t sum = 0;
+  for (int i = 0; i < count; i++) {
+    sum += buf[i];
+  }
+  float mean = (float)sum / (float)count;
+
+  // Goertzel algorithm for 50Hz fundamental power signal extraction
+  // Fs = 10000 Hz (100us sampling period), N = 200 (k = 1.0)
+  float omega50 = (2.0f * 3.14159265f * 1.0f) / (float)count;
+  float coeff50 = 2.0f * cosf(omega50);
+  float q0_50 = 0.0f, q1_50 = 0.0f, q2_50 = 0.0f;
+
+  for (int i = 0; i < count; i++) {
+    float s = (float)buf[i] - mean; // 🔑 DC REMOVED PREVENTING FALSE RMS EXPLOSION
+    q0_50 = coeff50 * q1_50 - q2_50 + s;
+    q2_50 = q1_50;
+    q1_50 = q0_50;
+  }
+
+  float real50 = q1_50 - q2_50 * cosf(omega50);
+  float imag50 = q2_50 * sinf(omega50);
+  float mag50 = sqrtf(real50 * real50 + imag50 * imag50) / ((float)count / 2.0f);
+  float rms50 = mag50 / 1.41421356f;
+
+  return (int32_t)((rms50 * ADC_LSB_uV) / 1000.0f);
 }
 
 void adc_param_init(void) {
@@ -216,16 +245,31 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
 
     k_mutex_lock(&data_mutex, K_FOREVER);
 
-    battery_mv = calc_battery_mv(adc_bat_buf[0]);
+    int32_t bat_sum = 0;
+    for (int i = 0; i < 16; i++) {
+      bat_sum += adc_bat_buf[i];
+    }
+    int16_t raw_bat_adc = (int16_t)(bat_sum / 16);
+    int32_t raw_battery_mv = calc_battery_mv(raw_bat_adc);
+
+    static int32_t ema_battery_mv = 0;
+    if (ema_battery_mv == 0) {
+      ema_battery_mv = raw_battery_mv;
+    } else {
+      // EMA low-pass filter (alpha = 1/8) to eliminate fluctuation noise
+      ema_battery_mv = (ema_battery_mv * 7 + raw_battery_mv) / 8;
+    }
+    battery_mv = ema_battery_mv;
     battery_percent = battery_percent_from_mv(battery_mv);
     AVGbattery_mv += battery_mv;
     AVGbattery_percent += battery_percent;
 
-    calc_mean_rms_p2p_mV(adc_blc_buf, SAMPLE_COUNT, &holdblc_mean_mv,
-                         &holdblc_rms_mv, &holdblc_p2p_mv);
+    holdblc_rms_mv = calc_50hz_fundamental_rms_mV(adc_blc_buf, SAMPLE_COUNT);
+    holdalc_rms_mv = calc_50hz_fundamental_rms_mV(adc_alc_buf, SAMPLE_COUNT);
+    int32_t dummy_p2p;
+    calc_mean_rms_p2p_mV(adc_blc_buf, SAMPLE_COUNT, &holdblc_mean_mv, &dummy_p2p, &holdblc_p2p_mv);
+    calc_mean_rms_p2p_mV(adc_alc_buf, SAMPLE_COUNT, &holdalc_mean_mv, &dummy_p2p, &holdalc_p2p_mv);
 
-    calc_mean_rms_p2p_mV(adc_alc_buf, SAMPLE_COUNT, &holdalc_mean_mv,
-                         &holdalc_rms_mv, &holdalc_p2p_mv);
     AVGblc_mean_mv += holdblc_mean_mv;
     AVGblc_rms_mv += holdblc_rms_mv;
     AVGalc_mean_mv += holdalc_mean_mv;
@@ -238,34 +282,72 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
       g_data.alc_rms_mv = AVGalc_rms_mv / count;
       g_data.battery_mv = AVGbattery_mv / count;
       g_data.battery_percent = AVGbattery_percent / count;
+      g_data.induced_voltage_mv = (g_data.blc_rms_mv > g_data.alc_rms_mv) ? g_data.blc_rms_mv : g_data.alc_rms_mv;
       g_data.selected_range = range_get();
       uint8_t ch = g_data.selected_range;
-      printk("BLC Mean: %d mV, RMS: %d mV\n", g_data.blc_mean_mv, g_data.blc_rms_mv);
-      printk("ALC Mean: %d mV, RMS: %d mV\n", g_data.alc_mean_mv, g_data.alc_rms_mv);
+      printk("BLC Mean: %d mV, 50Hz RMS: %d mV\n", g_data.blc_mean_mv, g_data.blc_rms_mv);
+      printk("ALC Mean: %d mV, 50Hz RMS: %d mV\n", g_data.alc_mean_mv, g_data.alc_rms_mv);
       printk("Battery: %d mV, %d%%\n", g_data.battery_mv, g_data.battery_percent);
       if (ch >= 16)
         ch = 0; // Safety guard
 
       channel_thresholds_t *t = &g_thresholds.channels[ch];
 
-      bool blc_mean_ok = (g_data.blc_mean_mv >= t->blc_mean_min &&
-                          g_data.blc_mean_mv <= t->blc_mean_max);
-      bool blc_rms_ok = (g_data.blc_rms_mv >= t->blc_rms_min &&
-                         g_data.blc_rms_mv <= t->blc_rms_max);
-      bool alc_mean_ok = (g_data.alc_mean_mv >= t->alc_mean_min &&
-                          g_data.alc_mean_mv <= t->alc_mean_max);
-      bool alc_rms_ok = (g_data.alc_rms_mv >= t->alc_rms_min &&
-                         g_data.alc_rms_mv <= t->alc_rms_max);
+      // 1. Live Thresholds for Range (35mV BLC, 25mV ALC defaults or configured blc_rms_min/alc_rms_min)
+      int32_t blc_live_thresh = (t->blc_rms_min > 0) ? t->blc_rms_min : 35;
+      int32_t alc_live_thresh = (t->alc_rms_min > 0) ? t->alc_rms_min : 25;
 
-      g_data.Line_detector_Status =
-          (blc_mean_ok && blc_rms_ok && alc_mean_ok && alc_rms_ok) ? 1 : 0;
-      printk("Line Detector Status: %d\n", g_data.Line_detector_Status);
-      if (gpio_is_ready_dt(&buzzer_spec)) {
-        gpio_pin_set_dt(&buzzer_spec, g_data.Line_detector_Status);
+      uint8_t status = STATUS_SAFE;
+      if (g_data.blc_rms_mv >= blc_live_thresh && g_data.alc_rms_mv >= alc_live_thresh) {
+        status = STATUS_LIVE; // ENERGIZED LIVE LINE
+      } else if (ch >= 2) {
+        // 2. Induced Danger Thresholds (90% of Live Range Sensitivity) for Channels >= 2 (3.3kV and above)
+        // Disable induced status for Channels 0 & 1 (230V & 1.1kV)
+        int32_t blc_induced_thresh = (blc_live_thresh * 90) / 100;
+        int32_t alc_induced_thresh = (alc_live_thresh * 90) / 100;
+
+        if (g_data.blc_rms_mv >= blc_induced_thresh || g_data.alc_rms_mv >= alc_induced_thresh) {
+          status = STATUS_INDUCED; // HAZARDOUS INDUCED VOLTAGE ON UNCHARGED LINE
+        } else {
+          status = STATUS_SAFE; // SAFE / DE-ENERGIZED LINE
+        }
+      } else {
+        status = STATUS_SAFE; // SAFE / DE-ENERGIZED LINE (Channels 0 & 1)
       }
-      if (gpio_is_ready_dt(&DetectionLed_spec)) {
-        gpio_pin_set_dt(&DetectionLed_spec, g_data.Line_detector_Status);
+
+      g_data.Line_detector_Status = status;
+      printk("Line Detector Status: %d (0:SAFE, 1:LIVE, 2:INDUCED, Range: %d), Induced V: %d mV\n",
+             g_data.Line_detector_Status, ch, g_data.induced_voltage_mv);
+
+      // Audio / Visual Signaling
+      if (g_data.Line_detector_Status == STATUS_LIVE) {
+        // Continuous Solid Tone & Solid LED for Live Line
+        if (gpio_is_ready_dt(&buzzer_spec)) {
+          gpio_pin_set_dt(&buzzer_spec, 1);
+        }
+        if (gpio_is_ready_dt(&DetectionLed_spec)) {
+          gpio_pin_set_dt(&DetectionLed_spec, 1);
+        }
+      } else if (g_data.Line_detector_Status == STATUS_INDUCED) {
+        // Pulsing/Beeping Buzzer & Flashing LED for Hazardous Induced Voltage
+        static uint8_t induced_blink = 0;
+        induced_blink = !induced_blink;
+        if (gpio_is_ready_dt(&buzzer_spec)) {
+          gpio_pin_set_dt(&buzzer_spec, induced_blink); // Beeping buzzer tone
+        }
+        if (gpio_is_ready_dt(&DetectionLed_spec)) {
+          gpio_pin_set_dt(&DetectionLed_spec, induced_blink); // Flashing LED
+        }
+      } else {
+        // Silent / Off for Safe Line
+        if (gpio_is_ready_dt(&buzzer_spec)) {
+          gpio_pin_set_dt(&buzzer_spec, 0); // OFF
+        }
+        if (gpio_is_ready_dt(&DetectionLed_spec)) {
+          gpio_pin_set_dt(&DetectionLed_spec, 0); // OFF
+        }
       }
+
       AVGblc_mean_mv = 0;
       AVGblc_rms_mv = 0;
       AVGalc_mean_mv = 0;
