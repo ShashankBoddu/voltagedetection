@@ -163,6 +163,7 @@ Extensive testing was conducted at 2 cm to 4 cm and 5 cm probe clearances across
 * **Verification & Validation (V&V)**:
   * Validated against PDF reports in `E:\projects\DevelopmentLevelCode\voltagedetection\NRF52\Report`.
   * Real-time UART printk diagnostic outputs: `230V Purity: 50Hz RMS = ... mV, 150Hz RMS = ... mV (3rd Harmonic = ...%)`.
+  * **Physical Hardware Validation (2026-09-16)**: Confirmed in real bench testing on live hardware with nRF52832 target controller. The detector successfully flags genuine 230 VAC line as `STATUS_LIVE` while actively suppressing and rejecting the phone charger DC cable as `STATUS_SAFE`.
 
 ---
 
@@ -212,8 +213,8 @@ Extensive testing was conducted at 2 cm to 4 cm and 5 cm probe clearances across
 
 ## 9. Ongoing Testing Notes & Future Tasks
 
-* [ ] Test 230 VAC live line detection at exactly 5 cm approach distance to confirm 35 mV threshold trigger.
-* [ ] Verify rejection of mobile charger DC cable at 5 cm clearance.
+* [x] Test 230 VAC live line detection at 5 cm approach distance to confirm threshold trigger (CONFIRMED & VALIDATED).
+* [x] Verify rejection of mobile charger DC cable at 5 cm clearance via 150Hz harmonic discriminator (CONFIRMED & VALIDATED).
 * [ ] Prototype 65 mm hemispherical sensor dome to replace flat PCB plate for omnidirectional field pickup.
 * [ ] Verify induced voltage warning levels on uncharged line adjacent to live 11kV/33kV test rig.
 * [ ] Fine-tune per-channel threshold tables in `g_thresholds` for higher voltage ranges (1.1kV, 11kV, 33kV, 132kV).
