@@ -46,6 +46,7 @@ typedef struct {
 #define STATUS_SAFE 0
 #define STATUS_LIVE 1
 #define STATUS_INDUCED 2
+#define STATUS_FAULT 3
 
 typedef struct {
   int32_t blc_mean_mv;

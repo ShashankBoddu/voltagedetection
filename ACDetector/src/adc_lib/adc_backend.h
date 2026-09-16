@@ -13,5 +13,6 @@ extern thresholds_t g_thresholds;
 
 void adc_get_snapshot(data_t *p_data, int16_t *p_blc, int16_t *p_alc);
 void buzzer_set(bool on);
+void annunciation_boot_selftest(void);
 
 #endif

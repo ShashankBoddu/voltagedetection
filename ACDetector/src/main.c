@@ -34,18 +34,8 @@ int main(void) {
     printk("Image successfully confirmed.\n");
   }
 
-  /* Boot Buzzer Notification (0.5s) */
-  buzzer_set(true);
-  k_sleep(K_MSEC(400));
-  buzzer_set(false);
-  k_sleep(K_MSEC(200));
-  buzzer_set(true);
-  k_sleep(K_MSEC(400));
-  buzzer_set(false);
-  k_sleep(K_MSEC(200));
-  buzzer_set(true);
-  k_sleep(K_MSEC(400));
-  buzzer_set(false);
+  /* Comprehensive Boot Self-Test (Buzzer, Red LED U5, Blue LED U8) */
+  annunciation_boot_selftest();
 
   printk("ACDetector Initialized. Releasing threads.\n");
   k_sem_give(&boot_done_sem); // Wakes ADC Thread

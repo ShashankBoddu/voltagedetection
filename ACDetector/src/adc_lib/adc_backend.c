@@ -58,8 +58,9 @@ static const struct gpio_dt_spec buzzer_spec =
 static const struct gpio_dt_spec DetectionLed_spec =
     GPIO_DT_SPEC_GET(DT_NODELABEL(lowbat), gpios);
 
-// static const struct gpio_dt_spec ble_led_spec =
-//     GPIO_DT_SPEC_GET(DT_NODELABEL(blemode), gpios);
+static const struct gpio_dt_spec ble_led_spec =
+    GPIO_DT_SPEC_GET(DT_NODELABEL(blemode), gpios);
+
 data_t g_data;
 thresholds_t g_thresholds;
 
@@ -74,6 +75,31 @@ void buzzer_set(bool on) {
   }
 }
 
+void annunciation_boot_selftest(void) {
+  printk("Boot Self-Test: Verifying Buzzer, Red LED U5, Blue LED U8...\n");
+  if (gpio_is_ready_dt(&buzzer_spec)) {
+    gpio_pin_set_dt(&buzzer_spec, 1);
+  }
+  if (gpio_is_ready_dt(&DetectionLed_spec)) {
+    gpio_pin_set_dt(&DetectionLed_spec, 1);
+  }
+  if (gpio_is_ready_dt(&ble_led_spec)) {
+    gpio_pin_set_dt(&ble_led_spec, 1);
+  }
+  k_sleep(K_MSEC(500));
+  if (gpio_is_ready_dt(&buzzer_spec)) {
+    gpio_pin_set_dt(&buzzer_spec, 0);
+  }
+  if (gpio_is_ready_dt(&DetectionLed_spec)) {
+    gpio_pin_set_dt(&DetectionLed_spec, 0);
+  }
+  if (gpio_is_ready_dt(&ble_led_spec)) {
+    gpio_pin_set_dt(&ble_led_spec, 0);
+  }
+  k_sleep(K_MSEC(100));
+  printk("Boot Self-Test Complete.\n");
+}
+
 /* ================= ADC Functions ================= */
 
 static int32_t calc_battery_mv(int16_t adc_counts) {
@@ -83,23 +109,26 @@ static int32_t calc_battery_mv(int16_t adc_counts) {
 }
 
 static uint8_t battery_percent_from_mv(int32_t batt_mv) {
-  if (batt_mv >= 9400)
-    return 100;
+  // Envie Rechargeable 9V Infinite 300mAh Ni-MH (7-cell series block, 8.4V nominal)
+  if (batt_mv >= 9600)
+    return 100; // Fresh off charger (~1.38V - 1.42V/cell)
   if (batt_mv >= 9200)
     return 90;
-  if (batt_mv >= 9000)
-    return 80;
   if (batt_mv >= 8800)
+    return 80;
+  if (batt_mv >= 8500)
     return 65;
-  if (batt_mv >= 8600)
-    return 50;
-  if (batt_mv >= 8400)
+  if (batt_mv >= 8300)
+    return 50;  // Flat Ni-MH nominal plateau (~1.19V - 1.20V/cell)
+  if (batt_mv >= 8100)
     return 35;
-  if (batt_mv >= 8200)
+  if (batt_mv >= 7800)
     return 20;
-  if (batt_mv >= 8000)
-    return 10;
-  return 0;
+  if (batt_mv >= 7400)
+    return 10;  // Low Battery Alert Threshold (~1.05V/cell)
+  if (batt_mv >= 7000)
+    return 5;   // Critical Low Battery Cutoff (~1.00V/cell)
+  return 0;     // Depleted (< 7.0V)
 }
 
 static void calc_mean_rms_p2p_mV(int16_t *buf, int count, int32_t *mean_mV,
@@ -205,14 +234,19 @@ void adc_param_init(void) {
 
   if (gpio_is_ready_dt(&DetectionLed_spec)) {
     gpio_pin_configure_dt(&DetectionLed_spec, GPIO_OUTPUT_INACTIVE);
-    printk("Detection LED (LOWBAT) GPIO ready\n");
+    printk("Detection LED (Red U5) GPIO ready\n");
   } else {
-    printk("Error: Detection LED (LOWBAT) GPIO not ready\n");
+    printk("Error: Detection LED (Red U5) GPIO not ready\n");
   }
 
-  // Use the board's DeviceTree to configure the channels correctly,
-  // including the critical .input_positive routing which prevents reading
-  // garbage.
+  if (gpio_is_ready_dt(&ble_led_spec)) {
+    gpio_pin_configure_dt(&ble_led_spec, GPIO_OUTPUT_INACTIVE);
+    printk("BLE Status LED (Blue U8) GPIO ready\n");
+  } else {
+    printk("Error: BLE Status LED (Blue U8) GPIO not ready\n");
+  }
+
+  // Configure SAADC Channels
   static struct adc_channel_cfg cfg_blc =
       ADC_CHANNEL_CFG_DT(DT_NODELABEL(beforelcch));
   adc_channel_setup(adc_dev, &cfg_blc);
@@ -224,6 +258,81 @@ void adc_param_init(void) {
   static struct adc_channel_cfg cfg_bat =
       ADC_CHANNEL_CFG_DT(DT_NODELABEL(batterych));
   adc_channel_setup(adc_dev, &cfg_bat);
+}
+
+/* ---------- 9-State Comprehensive System Annunciation Engine ---------- */
+static void update_annunciation(uint8_t status, int32_t batt_mv, bool ble_conn) {
+  static uint32_t tick = 0;
+  tick++;
+
+  bool buzzer_out = false;
+  bool red_led_out = false;
+  bool blue_led_out = false;
+
+  bool is_low_bat = (batt_mv > 0 && batt_mv < 7350);
+
+  if (status == STATUS_FAULT) {
+    // 9. Hardware Fault (Self-Test Fail / Preamp DC bias abnormal)
+    // Red & Blue LED Alternating Strobe at 5 Hz (period = 200 ms = 20 ticks)
+    uint32_t phase = tick % 20;
+    red_led_out = (phase < 10);
+    blue_led_out = (phase >= 10);
+    // Rapid short error chirps: 50 ms ON (5 ticks), 150 ms OFF
+    buzzer_out = (phase < 5);
+  } else if (status == STATUS_LIVE) {
+    // 6 & 7. LIVE Alarm (Energized Line)
+    buzzer_out = true;  // Continuous loud siren (100% duty)
+    red_led_out = true; // Solid ON (100% duty)
+    if (ble_conn) {
+      blue_led_out = true; // Solid ON when connected
+    } else {
+      blue_led_out = ((tick % 100) < 10); // Slow blink 1 Hz, 10% duty (100 ms ON)
+    }
+  } else if (status == STATUS_INDUCED) {
+    // 4 & 5. Hazardous Induced Voltage Warning (Channels >= 2, 25% to 90% threshold)
+    // Pulsing beep 2 Hz, 50% duty (250 ms ON, 250 ms OFF = period 500 ms = 50 ticks)
+    buzzer_out = ((tick % 50) < 25);
+    // Rapid flash 4 Hz, 50% duty (125 ms ON, 125 ms OFF = period 250 ms = 25 ticks)
+    red_led_out = ((tick % 25) < 13);
+    if (ble_conn) {
+      blue_led_out = true;
+    } else {
+      blue_led_out = ((tick % 100) < 10);
+    }
+  } else {
+    // 2, 3, & 8. Safe Line (< 25% threshold)
+    if (is_low_bat) {
+      // 8. Low Battery Warning (< 7350 mV)
+      // Double flash Red LED every 3 seconds (300 ticks)
+      // Flash 1: 0..7 (80 ms), Gap: 8..15 (80 ms), Flash 2: 16..23 (80 ms)
+      uint32_t bat_led_phase = tick % 300;
+      red_led_out = (bat_led_phase < 8) || (bat_led_phase >= 16 && bat_led_phase < 24);
+
+      // Double chirp Buzzer every 10 seconds (1000 ticks)
+      // Chirp 1: 0..5 (60 ms), Gap: 6..15 (100 ms), Chirp 2: 16..21 (60 ms)
+      uint32_t bat_buzz_phase = tick % 1000;
+      buzzer_out = (bat_buzz_phase < 6) || (bat_buzz_phase >= 16 && bat_buzz_phase < 22);
+    } else {
+      buzzer_out = false;
+      red_led_out = false;
+    }
+
+    if (ble_conn) {
+      blue_led_out = true; // 3. Safe Line (BLE Connected)
+    } else {
+      blue_led_out = ((tick % 100) < 10); // 2. Safe Line (BLE Disconnected: Slow Blink 1 Hz)
+    }
+  }
+
+  if (gpio_is_ready_dt(&buzzer_spec)) {
+    gpio_pin_set_dt(&buzzer_spec, buzzer_out ? 1 : 0);
+  }
+  if (gpio_is_ready_dt(&DetectionLed_spec)) {
+    gpio_pin_set_dt(&DetectionLed_spec, red_led_out ? 1 : 0);
+  }
+  if (gpio_is_ready_dt(&ble_led_spec)) {
+    gpio_pin_set_dt(&ble_led_spec, blue_led_out ? 1 : 0);
+  }
 }
 
 // Wrapper for channel setup using DT if preferred, but simplified above for
@@ -332,74 +441,59 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
       int32_t blc_live_thresh = (t->blc_rms_min > 0) ? t->blc_rms_min : 35;
       int32_t alc_live_thresh = (t->alc_rms_min > 0) ? t->alc_rms_min : 25;
 
+      // Method A Continuous Self-Test: Preamplifier DC Bias Health Check
+      // Nominal MCP601 DC bias is VDD/2 = ~1650 mV.
+      // Abnormal bias (< 800 mV or > 2400 mV) flags sensor plate disconnect or op-amp ESD failure.
+      bool hw_fault = (g_data.blc_mean_mv < 800 || g_data.blc_mean_mv > 2400);
+
+      // Compute 150 Hz 3rd-Harmonic Distortion Ratio
+      int32_t harmonic_150hz_pct = (g_data.blc_rms_mv > 0) ?
+                                   ((blc_150hz_rms_mv * 100) / g_data.blc_rms_mv) : 0;
+
       uint8_t status = STATUS_SAFE;
-      if (g_data.blc_rms_mv >= blc_live_thresh && g_data.alc_rms_mv >= alc_live_thresh) {
-        if (ch == 0) {
-          // Channel 0 (230V Range): 150Hz 3rd-Harmonic Rectifier Discriminator
-          // Clean 230VAC utility lines have very low 150Hz harmonic (< 15% of 50Hz).
-          // Mobile phone chargers use full-wave diode bridge rectifiers producing massive 150Hz content (> 25%).
-          int32_t harmonic_150hz_pct = (g_data.blc_rms_mv > 0) ?
-                                       ((blc_150hz_rms_mv * 100) / g_data.blc_rms_mv) : 0;
-
-          if (harmonic_150hz_pct >= 20) {
-            status = STATUS_SAFE; // Suppress false alarm: SMPS phone charger / adapter
-            printk("--> REJECTED: SMPS Charger detected (150Hz harmonic %d%% >= 20%%)\n",
-                   harmonic_150hz_pct);
-          } else {
-            status = STATUS_LIVE; // Validated genuine sinusoidal 230VAC line
-            printk("--> VALIDATED LIVE: Clean 230VAC utility power (150Hz harmonic %d%% < 20%%)\n",
-                   harmonic_150hz_pct);
-          }
-        } else {
-          status = STATUS_LIVE; // ENERGIZED LIVE LINE (High Voltage Ranges >= 1.1kV)
-        }
+      if (hw_fault) {
+        status = STATUS_FAULT;
+        printk("--> HARDWARE FAULT: Preamp DC bias out-of-range (%d mV, expected 800-2400 mV)\n",
+               g_data.blc_mean_mv);
+      } else if (harmonic_150hz_pct >= 20) {
+        // Universal SMPS Rectifier Discriminator (All Channels):
+        // Genuine utility power and genuine induced fields have clean sinusoidal 50Hz (150Hz harmonic < 10%).
+        // Mobile chargers, power adapters, and SMPS rectifiers produce massive 150Hz content (> 25%).
+        status = STATUS_SAFE; // Suppress SMPS charger / adapter leakage across all ranges
+        printk("--> REJECTED: SMPS Charger noise detected (150Hz harmonic %d%% >= 20%%, Range: %d)\n",
+               harmonic_150hz_pct, ch);
+      } else if (g_data.blc_rms_mv >= blc_live_thresh && g_data.alc_rms_mv >= alc_live_thresh) {
+        // ENERGIZED LIVE LINE (Clean sinusoidal utility grid power)
+        status = STATUS_LIVE;
+        printk("--> VALIDATED LIVE LINE: Channel %d (50Hz RMS: BLC %d mV, ALC %d mV, 150Hz: %d%%)\n",
+               ch, g_data.blc_rms_mv, g_data.alc_rms_mv, harmonic_150hz_pct);
       } else if (ch >= 2) {
-        // 2. Induced Danger Thresholds (90% of Live Range Sensitivity) for Channels >= 2 (3.3kV and above)
-        // Disable induced status for Channels 0 & 1 (230V & 1.1kV)
-        int32_t blc_induced_thresh = (blc_live_thresh * 90) / 100;
-        int32_t alc_induced_thresh = (alc_live_thresh * 90) / 100;
+        // Hazardous Induced Voltage Detection for High-Voltage Ranges (Channels >= 2, 3.3kV to 765kV):
+        // 1. Dual-Channel Coincidence (&&): Both BLC and ALC must confirm.
+        // 2. High-Voltage Induced Threshold: Set to 75% of Live threshold to reject low-voltage ambient room coupling.
+        int32_t blc_induced_thresh = (blc_live_thresh * 80) / 100;
+        int32_t alc_induced_thresh = (alc_live_thresh * 75) / 100;
 
-        if (g_data.blc_rms_mv >= blc_induced_thresh || g_data.alc_rms_mv >= alc_induced_thresh) {
-          status = STATUS_INDUCED; // HAZARDOUS INDUCED VOLTAGE ON UNCHARGED LINE
+        // Minimum physical noise floor clamp
+        if (blc_induced_thresh < 20) {
+          blc_induced_thresh = 20;
+        }
+        if (alc_induced_thresh < 22) {
+          alc_induced_thresh = 22;
+        }
+
+        if (g_data.blc_rms_mv >= blc_induced_thresh && g_data.alc_rms_mv >= alc_induced_thresh) {
+          status = STATUS_INDUCED; // Genuine hazardous induced voltage on uncharged HV line
         } else {
-          status = STATUS_SAFE; // SAFE / DE-ENERGIZED LINE
+          status = STATUS_SAFE; // Clean de-energized line (ambient room noise rejected)
         }
       } else {
-        status = STATUS_SAFE; // SAFE / DE-ENERGIZED LINE (Channels 0 & 1)
+        status = STATUS_SAFE; // SAFE / DE-ENERGIZED LINE (Channels 0 & 1: 230V & 1.1kV)
       }
 
       g_data.Line_detector_Status = status;
-      printk("Line Detector Status: %d (0:SAFE, 1:LIVE, 2:INDUCED, Range: %d), Induced V: %d mV\n",
+      printk("Line Detector Status: %d (0:SAFE, 1:LIVE, 2:INDUCED, 3:FAULT, Range: %d), Induced V: %d mV\n",
              g_data.Line_detector_Status, ch, g_data.induced_voltage_mv);
-
-      // Audio / Visual Signaling
-      if (g_data.Line_detector_Status == STATUS_LIVE) {
-        // Continuous Solid Tone & Solid LED for Live Line
-        if (gpio_is_ready_dt(&buzzer_spec)) {
-          gpio_pin_set_dt(&buzzer_spec, 1);
-        }
-        if (gpio_is_ready_dt(&DetectionLed_spec)) {
-          gpio_pin_set_dt(&DetectionLed_spec, 1);
-        }
-      } else if (g_data.Line_detector_Status == STATUS_INDUCED) {
-        // Pulsing/Beeping Buzzer & Flashing LED for Hazardous Induced Voltage
-        static uint8_t induced_blink = 0;
-        induced_blink = !induced_blink;
-        if (gpio_is_ready_dt(&buzzer_spec)) {
-          gpio_pin_set_dt(&buzzer_spec, induced_blink); // Beeping buzzer tone
-        }
-        if (gpio_is_ready_dt(&DetectionLed_spec)) {
-          gpio_pin_set_dt(&DetectionLed_spec, induced_blink); // Flashing LED
-        }
-      } else {
-        // Silent / Off for Safe Line
-        if (gpio_is_ready_dt(&buzzer_spec)) {
-          gpio_pin_set_dt(&buzzer_spec, 0); // OFF
-        }
-        if (gpio_is_ready_dt(&DetectionLed_spec)) {
-          gpio_pin_set_dt(&DetectionLed_spec, 0); // OFF
-        }
-      }
 
       AVGblc_mean_mv = 0;
       AVGblc_rms_mv = 0;
@@ -415,6 +509,9 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
       k_mutex_unlock(&data_mutex);
     }
 
+    // Continuous 10 ms Annunciation Engine Update
+    update_annunciation(g_data.Line_detector_Status, g_data.battery_mv, ble_is_connected());
+
     k_sleep(K_MSEC(ADC_PERIOD_MS));
   }
 }
@@ -423,6 +520,7 @@ void adc_get_snapshot(data_t *p_data, int16_t *p_blc, int16_t *p_alc) {
   k_mutex_lock(&data_mutex, K_FOREVER);
   if (p_data) {
     *p_data = g_data;
+    p_data->selected_range = range_get();
   }
   if (p_blc) {
     memcpy(p_blc, published_blc_buf, sizeof(published_blc_buf));
