@@ -134,8 +134,10 @@ static void calc_mean_rms_p2p_mV(int16_t *buf, int count, int32_t *mean_mV,
   *p2p_mV = (p2p_counts * ADC_LSB_uV) / 1000;
 }
 
-/* ---------- 50Hz Fundamental Power Frequency Filter (Goertzel) ---------- */
-static int32_t calc_50hz_fundamental_rms_mV(int16_t *buf, int count) {
+/* ---------- Dual-Frequency Power Signal Goertzel Filter (50Hz + 150Hz) ---------- */
+static void calc_goertzel_50hz_150hz_rms_mV(int16_t *buf, int count,
+                                            int32_t *out_rms_50,
+                                            int32_t *out_rms_150) {
   // First pass: Calculate mean (DC offset removal)
   int64_t sum = 0;
   for (int i = 0; i < count; i++) {
@@ -143,26 +145,49 @@ static int32_t calc_50hz_fundamental_rms_mV(int16_t *buf, int count) {
   }
   float mean = (float)sum / (float)count;
 
-  // Goertzel algorithm for 50Hz fundamental power signal extraction
-  // Fs = 10000 Hz (100us sampling period), N = 200 (k = 1.0)
+  // 50Hz fundamental power signal (Fs = 10000 Hz, N = 200, k = 1.0)
   float omega50 = (2.0f * 3.14159265f * 1.0f) / (float)count;
   float coeff50 = 2.0f * cosf(omega50);
   float q0_50 = 0.0f, q1_50 = 0.0f, q2_50 = 0.0f;
 
+  // 150Hz 3rd harmonic (k = 3.0) for SMPS diode bridge rectifier detection
+  float omega150 = (2.0f * 3.14159265f * 3.0f) / (float)count;
+  float coeff150 = 2.0f * cosf(omega150);
+  float q0_150 = 0.0f, q1_150 = 0.0f, q2_150 = 0.0f;
+
   for (int i = 0; i < count; i++) {
-    float s = (float)buf[i] - mean; // 🔑 DC REMOVED PREVENTING FALSE RMS EXPLOSION
+    float s = (float)buf[i] - mean; // DC removed
+    // 50Hz Goertzel
     q0_50 = coeff50 * q1_50 - q2_50 + s;
     q2_50 = q1_50;
     q1_50 = q0_50;
+
+    // 150Hz Goertzel
+    q0_150 = coeff150 * q1_150 - q2_150 + s;
+    q2_150 = q1_150;
+    q1_150 = q0_150;
   }
 
+  // 50Hz RMS
   float real50 = q1_50 - q2_50 * cosf(omega50);
   float imag50 = q2_50 * sinf(omega50);
   float mag50 = sqrtf(real50 * real50 + imag50 * imag50) / ((float)count / 2.0f);
   float rms50 = mag50 / 1.41421356f;
 
-  return (int32_t)((rms50 * ADC_LSB_uV) / 1000.0f);
+  // 150Hz RMS
+  float real150 = q1_150 - q2_150 * cosf(omega150);
+  float imag150 = q2_150 * sinf(omega150);
+  float mag150 = sqrtf(real150 * real150 + imag150 * imag150) / ((float)count / 2.0f);
+  float rms150 = mag150 / 1.41421356f;
+
+  if (out_rms_50) {
+    *out_rms_50 = (int32_t)((rms50 * ADC_LSB_uV) / 1000.0f);
+  }
+  if (out_rms_150) {
+    *out_rms_150 = (int32_t)((rms150 * ADC_LSB_uV) / 1000.0f);
+  }
 }
+
 
 void adc_param_init(void) {
   if (!device_is_ready(adc_dev)) {
@@ -218,6 +243,7 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
 
   static int64_t AVGblc_mean_mv = 0;
   static int64_t AVGblc_rms_mv = 0;
+  static int64_t AVGblc_150hz_rms_mv = 0;
   static int64_t AVGalc_mean_mv = 0;
   static int64_t AVGalc_rms_mv = 0;
   static int64_t AVGbattery_mv = 0;
@@ -225,9 +251,11 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
   static uint32_t count = 0;
   static int32_t holdblc_mean_mv = 0;
   static int32_t holdblc_rms_mv = 0;
+  static int32_t holdblc_150hz_rms_mv = 0;
   static int32_t holdblc_p2p_mv = 0;
   static int32_t holdalc_mean_mv = 0;
   static int32_t holdalc_rms_mv = 0;
+  static int32_t holdalc_150hz_rms_mv = 0;
   static int32_t holdalc_p2p_mv = 0;
   static int32_t battery_mv = 0;
   static int32_t battery_percent = 0;
@@ -268,20 +296,22 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
     AVGbattery_mv += battery_mv;
     AVGbattery_percent += battery_percent;
 
-    holdblc_rms_mv = calc_50hz_fundamental_rms_mV(adc_blc_buf, SAMPLE_COUNT);
-    holdalc_rms_mv = calc_50hz_fundamental_rms_mV(adc_alc_buf, SAMPLE_COUNT);
+    calc_goertzel_50hz_150hz_rms_mV(adc_blc_buf, SAMPLE_COUNT, &holdblc_rms_mv, &holdblc_150hz_rms_mv);
+    calc_goertzel_50hz_150hz_rms_mV(adc_alc_buf, SAMPLE_COUNT, &holdalc_rms_mv, &holdalc_150hz_rms_mv);
     int32_t dummy_p2p;
     calc_mean_rms_p2p_mV(adc_blc_buf, SAMPLE_COUNT, &holdblc_mean_mv, &dummy_p2p, &holdblc_p2p_mv);
     calc_mean_rms_p2p_mV(adc_alc_buf, SAMPLE_COUNT, &holdalc_mean_mv, &dummy_p2p, &holdalc_p2p_mv);
 
     AVGblc_mean_mv += holdblc_mean_mv;
     AVGblc_rms_mv += holdblc_rms_mv;
+    AVGblc_150hz_rms_mv += holdblc_150hz_rms_mv;
     AVGalc_mean_mv += holdalc_mean_mv;
     AVGalc_rms_mv += holdalc_rms_mv;
     count++;
     if (count == ADC_AVG_COUNT) {
       g_data.blc_mean_mv = AVGblc_mean_mv / count;
       g_data.blc_rms_mv = AVGblc_rms_mv / count;
+      int32_t blc_150hz_rms_mv = (int32_t)(AVGblc_150hz_rms_mv / count);
       g_data.alc_mean_mv = AVGalc_mean_mv / count;
       g_data.alc_rms_mv = AVGalc_rms_mv / count;
       g_data.battery_mv = AVGbattery_mv / count;
@@ -289,7 +319,8 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
       g_data.induced_voltage_mv = (g_data.blc_rms_mv > g_data.alc_rms_mv) ? g_data.blc_rms_mv : g_data.alc_rms_mv;
       g_data.selected_range = range_get();
       uint8_t ch = g_data.selected_range;
-      printk("BLC Mean: %d mV, 50Hz RMS: %d mV\n", g_data.blc_mean_mv, g_data.blc_rms_mv);
+      printk("BLC Mean: %d mV, 50Hz RMS: %d mV, 150Hz RMS: %d mV\n",
+             g_data.blc_mean_mv, g_data.blc_rms_mv, blc_150hz_rms_mv);
       printk("ALC Mean: %d mV, 50Hz RMS: %d mV\n", g_data.alc_mean_mv, g_data.alc_rms_mv);
       printk("Battery: %d mV, %d%%\n", g_data.battery_mv, g_data.battery_percent);
       if (ch >= 16)
@@ -303,7 +334,25 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
 
       uint8_t status = STATUS_SAFE;
       if (g_data.blc_rms_mv >= blc_live_thresh && g_data.alc_rms_mv >= alc_live_thresh) {
-        status = STATUS_LIVE; // ENERGIZED LIVE LINE
+        if (ch == 0) {
+          // Channel 0 (230V Range): 150Hz 3rd-Harmonic Rectifier Discriminator
+          // Clean 230VAC utility lines have very low 150Hz harmonic (< 15% of 50Hz).
+          // Mobile phone chargers use full-wave diode bridge rectifiers producing massive 150Hz content (> 25%).
+          int32_t harmonic_150hz_pct = (g_data.blc_rms_mv > 0) ?
+                                       ((blc_150hz_rms_mv * 100) / g_data.blc_rms_mv) : 0;
+
+          if (harmonic_150hz_pct >= 20) {
+            status = STATUS_SAFE; // Suppress false alarm: SMPS phone charger / adapter
+            printk("--> REJECTED: SMPS Charger detected (150Hz harmonic %d%% >= 20%%)\n",
+                   harmonic_150hz_pct);
+          } else {
+            status = STATUS_LIVE; // Validated genuine sinusoidal 230VAC line
+            printk("--> VALIDATED LIVE: Clean 230VAC utility power (150Hz harmonic %d%% < 20%%)\n",
+                   harmonic_150hz_pct);
+          }
+        } else {
+          status = STATUS_LIVE; // ENERGIZED LIVE LINE (High Voltage Ranges >= 1.1kV)
+        }
       } else if (ch >= 2) {
         // 2. Induced Danger Thresholds (90% of Live Range Sensitivity) for Channels >= 2 (3.3kV and above)
         // Disable induced status for Channels 0 & 1 (230V & 1.1kV)
@@ -354,6 +403,7 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
 
       AVGblc_mean_mv = 0;
       AVGblc_rms_mv = 0;
+      AVGblc_150hz_rms_mv = 0;
       AVGalc_mean_mv = 0;
       AVGalc_rms_mv = 0;
       AVGbattery_mv = 0;
