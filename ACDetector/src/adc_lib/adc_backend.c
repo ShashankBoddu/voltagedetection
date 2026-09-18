@@ -355,6 +355,7 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
   static int64_t AVGblc_150hz_rms_mv = 0;
   static int64_t AVGalc_mean_mv = 0;
   static int64_t AVGalc_rms_mv = 0;
+  static int64_t AVGalc_150hz_rms_mv = 0;
   static int64_t AVGbattery_mv = 0;
   static int64_t AVGbattery_percent = 0;
   static uint32_t count = 0;
@@ -416,6 +417,7 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
     AVGblc_150hz_rms_mv += holdblc_150hz_rms_mv;
     AVGalc_mean_mv += holdalc_mean_mv;
     AVGalc_rms_mv += holdalc_rms_mv;
+    AVGalc_150hz_rms_mv += holdalc_150hz_rms_mv;
     count++;
     if (count == ADC_AVG_COUNT) {
       g_data.blc_mean_mv = AVGblc_mean_mv / count;
@@ -423,6 +425,7 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
       int32_t blc_150hz_rms_mv = (int32_t)(AVGblc_150hz_rms_mv / count);
       g_data.alc_mean_mv = AVGalc_mean_mv / count;
       g_data.alc_rms_mv = AVGalc_rms_mv / count;
+      int32_t alc_150hz_rms_mv = (int32_t)(AVGalc_150hz_rms_mv / count);
       g_data.battery_mv = AVGbattery_mv / count;
       g_data.battery_percent = AVGbattery_percent / count;
       g_data.induced_voltage_mv = (g_data.blc_rms_mv > g_data.alc_rms_mv) ? g_data.blc_rms_mv : g_data.alc_rms_mv;
@@ -430,43 +433,63 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
       uint8_t ch = g_data.selected_range;
       printk("BLC Mean: %d mV, 50Hz RMS: %d mV, 150Hz RMS: %d mV\n",
              g_data.blc_mean_mv, g_data.blc_rms_mv, blc_150hz_rms_mv);
-      printk("ALC Mean: %d mV, 50Hz RMS: %d mV\n", g_data.alc_mean_mv, g_data.alc_rms_mv);
+      printk("ALC Mean: %d mV, 50Hz RMS: %d mV, 150Hz RMS: %d mV\n",
+             g_data.alc_mean_mv, g_data.alc_rms_mv, alc_150hz_rms_mv);
       printk("Battery: %d mV, %d%%\n", g_data.battery_mv, g_data.battery_percent);
       if (ch >= 16)
         ch = 0; // Safety guard
 
       channel_thresholds_t *t = &g_thresholds.channels[ch];
 
-      // 1. Live Thresholds for Range (35mV BLC, 25mV ALC defaults or configured blc_rms_min/alc_rms_min)
+      // 1. Live Thresholds for Range (Configured or Calibrated Defaults)
       int32_t blc_live_thresh = (t->blc_rms_min > 0) ? t->blc_rms_min : 35;
       int32_t alc_live_thresh = (t->alc_rms_min > 0) ? t->alc_rms_min : 25;
+      if (ch == 0) {
+        // For Channel 0 (230V Range) on standard / FDM enclosure:
+        // Cap old uncalibrated defaults (35/25) to 15 mV BLC and 10 mV ALC
+        if (blc_live_thresh > 20) {
+          blc_live_thresh = 15;
+        }
+        if (alc_live_thresh > 15) {
+          alc_live_thresh = 10;
+        }
+      }
 
       // Method A Continuous Self-Test: Preamplifier DC Bias Health Check
       // Nominal MCP601 DC bias is VDD/2 = ~1650 mV.
       // Abnormal bias (< 800 mV or > 2400 mV) flags sensor plate disconnect or op-amp ESD failure.
       bool hw_fault = (g_data.blc_mean_mv < 800 || g_data.blc_mean_mv > 2400);
 
-      // Compute 150 Hz 3rd-Harmonic Distortion Ratio
-      int32_t harmonic_150hz_pct = (g_data.blc_rms_mv > 0) ?
-                                   ((blc_150hz_rms_mv * 100) / g_data.blc_rms_mv) : 0;
+      // Compute 150 Hz 3rd-Harmonic Distortion Ratio on BLC core antenna
+      int32_t blc_150hz_pct = (g_data.blc_rms_mv > 0) ?
+                              ((blc_150hz_rms_mv * 100) / g_data.blc_rms_mv) : 0;
+
+      // Compute 150 Hz 3rd-Harmonic Distortion Ratio on ALC filtered antenna
+      int32_t alc_150hz_pct = (g_data.alc_rms_mv > 0) ?
+                              ((alc_150hz_rms_mv * 100) / g_data.alc_rms_mv) : 0;
+
+      // SMPS Charger Cable vs. 230V Utility Grid Discrimination:
+      // 1. Genuine 230V utility grid lines (clean 50Hz sine wave):
+      //    The active analog filter wipes out 150Hz on ALC completely (alc_150hz_pct < 8%).
+      // 2. A floating phone charger DC cable carries intense common-mode rectifier pulses:
+      //    150Hz harmonic is dominant on BLC (>= 150%) OR leaks heavily through the filter into ALC (alc_150hz_pct >= 15%).
+      bool is_smps_charger = (blc_150hz_pct >= 150) || (alc_150hz_pct >= 15);
 
       uint8_t status = STATUS_SAFE;
       if (hw_fault) {
         status = STATUS_FAULT;
         printk("--> HARDWARE FAULT: Preamp DC bias out-of-range (%d mV, expected 800-2400 mV)\n",
                g_data.blc_mean_mv);
-      } else if (harmonic_150hz_pct >= 20) {
-        // Universal SMPS Rectifier Discriminator (All Channels):
-        // Genuine utility power and genuine induced fields have clean sinusoidal 50Hz (150Hz harmonic < 10%).
-        // Mobile chargers, power adapters, and SMPS rectifiers produce massive 150Hz content (> 25%).
-        status = STATUS_SAFE; // Suppress SMPS charger / adapter leakage across all ranges
-        printk("--> REJECTED: SMPS Charger noise detected (150Hz harmonic %d%% >= 20%%, Range: %d)\n",
-               harmonic_150hz_pct, ch);
+      } else if (is_smps_charger) {
+        // Suppress SMPS charger / adapter DC cable leakage
+        status = STATUS_SAFE;
+        printk("--> REJECTED: Charger DC cable noise (BLC 150Hz: %d%%, ALC 150Hz: %d%% >= 15%%, Range: %d)\n",
+               blc_150hz_pct, alc_150hz_pct, ch);
       } else if (g_data.blc_rms_mv >= blc_live_thresh && g_data.alc_rms_mv >= alc_live_thresh) {
-        // ENERGIZED LIVE LINE (Clean sinusoidal utility grid power)
+        // ENERGIZED LIVE LINE (Validated 230V / High Voltage utility grid power)
         status = STATUS_LIVE;
-        printk("--> VALIDATED LIVE LINE: Channel %d (50Hz RMS: BLC %d mV, ALC %d mV, 150Hz: %d%%)\n",
-               ch, g_data.blc_rms_mv, g_data.alc_rms_mv, harmonic_150hz_pct);
+        printk("--> VALIDATED LIVE LINE: Channel %d (50Hz RMS: BLC %d mV [thresh %d], ALC %d mV [thresh %d], 150Hz: %d%%)\n",
+               ch, g_data.blc_rms_mv, blc_live_thresh, g_data.alc_rms_mv, alc_live_thresh, blc_150hz_pct);
       } else if (ch >= 2) {
         // Hazardous Induced Voltage Detection for High-Voltage Ranges (Channels >= 2, 3.3kV to 765kV):
         // 1. Dual-Channel Coincidence (&&): Both BLC and ALC must confirm.
@@ -500,6 +523,7 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
       AVGblc_150hz_rms_mv = 0;
       AVGalc_mean_mv = 0;
       AVGalc_rms_mv = 0;
+      AVGalc_150hz_rms_mv = 0;
       AVGbattery_mv = 0;
       AVGbattery_percent = 0;
       count = 0;

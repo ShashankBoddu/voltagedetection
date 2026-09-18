@@ -49,6 +49,10 @@ int storage_init(thresholds_t *thresholds) {
   for (int i = 0; i < 16; i++) {
     thresholds->channels[i] = default_channel;
   }
+  // Channel 0 (230V Range) calibrated for standard / FDM enclosure (15 mV BLC, 10 mV ALC)
+  thresholds->channels[0].blc_rms_min = 15;
+  thresholds->channels[0].alc_rms_min = 10;
+
 
   int err = settings_subsys_init();
   if (err) {

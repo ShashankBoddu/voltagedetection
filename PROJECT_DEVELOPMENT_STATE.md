@@ -173,22 +173,40 @@ Because the detector uses fixed-gain attenuators switched by the CD74HC4067 16-c
   * `PKT_STATS_2` (Type 5, 10 Bytes): `alc_mean_mV`, `alc_rms_mV`, `selected_range` (uint8).
   * `PKT_BLC` / `PKT_ALC` (Types 1 & 2): Raw 200-point waveform buffers (plotted in real-time oscillograms).
 
-### Implementation Roadmap for `ac-detector-expo`
-1. **Handle `STATUS_FAULT` (Status Code 3)**:
-   * Render high-priority warning card / modal with diagonal red/black warning stripes:  
-     `"HARDWARE SENSOR FAULT: Preamplifier DC bias out-of-range (<800 mV or >2400 mV). Sensor plate trace broken or ESD damaged. Do NOT use detector!"`
-   * Trigger continuous error vibration pattern.
-2. **Handle `STATUS_INDUCED` (Status Code 2, IEC 61243-1 Compliance)**:
-   * Render amber hazard alert: `"HAZARDOUS INDUCED VOLTAGE DETECTED (25% - 90% Threshold)"`.
-   * Display warning: `"Line de-energized but floating with lethal induced charge. Ground before touching!"`
-   * Trigger 2 Hz pulsing haptic pulse and amber pulsing banner.
-3. **Low Battery Warning Alert**:
-   * If `battery_mv < 7350` or `battery_percent <= 5%`: Display persistent low battery warning banner `"Low Battery: Replace/Recharge Envie 9V Ni-MH Battery Immediately"`.
-4. **Implement "Induced kV Auto-Scan" UI Component**:
-   * Add prominent button: `"Scan Induced Potential (765 kV -> 3.3 kV)"`.
-   * Build automated step-down state machine executing the top-down sequence with 200 ms settling delays.
-   * Render real-time scan progress stepper with live channel indicator and oscillogram feed.
-   * Display final diagnostic summary card with estimated induced potential bracket and safety recommendations.
+### Implementation Status for `ac-detector-expo` (Completed 2026-09-17)
+1. **Dedicated First Screen (BLE Connection Screen - `BleScanScreen.tsx`)**:
+   * Brand title: `"NCVD"` powered by `"Fervid Smart"`.
+   * `"Scan NCVD device"` button with spinning indicator and status feedback.
+   * Discovered devices filtered exclusively for `"AC_DETECTOR"` hardware.
+   * Displays device card with MAC address, animated RSSI signal strength bars (dBm), and `"Connect"` button.
+   * Old grey StatusCard removed from the connection screen.
+2. **Unified Indicator Panel (`IndicatorPanel.tsx`)**:
+   * Compact header row: Device ID (`AC_DETECTOR / MAC`), Battery % with exact voltage (`85% (8.40V)`), Sound Mute/Unmute toggle, and Disconnect button.
+   * Dynamic IEC 61243-1 Status Banner:
+     * `DE-ENERGIZED (SAFE)`: Emerald green (`#10B981`)
+     * `ACTIVE LINE - DANGER`: Pulsing crimson red (`#EF4444`) + continuous siren audio + continuous haptics
+     * `HAZARDOUS INDUCED VOLTAGE`: Pulsing safety amber (`#F59E0B`) + 2 Hz pulsing beep audio + warning haptics
+     * `HARDWARE SENSOR FAULT`: Hazard red/black stripes (`#DC2626`) + warning chirp audio
+   * Safe Clearance Distance Guide: Automatically calculates nominal voltage and recommended safe distance in meters based on active range (e.g., `Nominal: 11 kV | Safe Distance: 0.25 m`).
+3. **Multi-Mode Waveform Oscilloscope (`WaveformOscilloscope.tsx`)**:
+   * Replaced redundant Real-Time Metrics cards with a single unified 200-sample oscilloscope widget.
+   * Horizontal swipe gesture and 3 top pill buttons (`BLC | ALC | DUAL`):
+     * `BLC`: BLC waveform + BLC Mean & BLC RMS mV overlay.
+     * `ALC`: ALC waveform + ALC Mean & ALC RMS mV overlay.
+     * `DUAL`: Overlapped BLC (Cyan `#06B6D4`) + ALC (Amber `#F59E0B`) waveforms + dual stats overlay.
+4. **Industrial Control Grid (`ControlGrid.tsx`)**:
+   * 4-Button Grid: `READ` (Single snapshot), `MONITOR` (Continuous 150ms streaming), `ANALYSE` (IEC Harmonics & PDF report), and `AUTO-SCAN` (In-place Step-Down Range Scan).
+   * In-Place Step-Down Sweep: Automatically descends from active range down to 1.1 kV with 350 ms settling dwell, displaying live progress bar (0% to 100%).
+     * Halts immediately with danger alert if `STATUS_LIVE` is encountered.
+     * Halts and locks the channel if `STATUS_INDUCED` is detected (e.g., `Induced at 33kV`).
+     * Displays `Confirmed De-Energized & Safe to Ground` if all channels pass.
+   * Full-width button: `"Open Calibration & Threshold Settings"`.
+5. **Critical Hardware Fault Modal (`FaultAlertModal.tsx`)**:
+   * High-priority warning modal triggered on `STATUS_FAULT` (Method A DC bias < 800 mV or > 2400 mV).
+6. **Mobile Audio Engine (`soundManager.ts` via `expo-av`)**:
+   * Plays disconnect chime on BLE drop, continuous siren on LIVE, 2 Hz beep on INDUCED, and chirps on FAULT. Includes in-app mute toggle.
+7. **App Branding & Icons**:
+   * High-resolution NCVD icon and splash screen assets applied to `app.json`, `assets/images/`, and Android `mipmap-*` / `drawable-*` directories.
 
 ---
 
@@ -334,6 +352,114 @@ Extensive testing was conducted across multiple test scenarios ([PDF Reports in 
 
 ## 11. Change Log & Engineering Update History
 
+### 2026-09-18: Implementation of Dual-Channel 150Hz Discriminator (ALC Filter Leakage & BLC Dominance)
+* **Subsystem Scope**: Digital Signal Processing (`adc_backend.c`), Enclosure Calibration (`storage_backend.c`), Detection State Machine
+* **Technical Description**:
+  * **Phone Charger DC Cable vs. 230V AC Line RCA**:
+    * Analyzed side-by-side diagnostic signal reports and mobile app calibration settings (BLC RMS Min: 15 mV, ALC RMS Min: 9 mV):
+      * *230V AC Line (16:43:35)*: BLC True RMS = **24 mV**, ALC True RMS = **14 mV** (50 Hz Mag: 2103, **ALC 150 Hz Mag = 0, 0.0% ratio**).
+      * *Phone Charger DC Cable (16:42:29)*: BLC True RMS = **37 mV**, ALC True RMS = **25 mV** (50 Hz Mag: 3397, **ALC 150 Hz Mag = 1129, 33.2% ratio**).
+    * *Root Cause of Simultaneous Detection*:
+      * Because the user's manual calibration thresholds were 15 mV BLC and 9 mV ALC, both the 230V line (24 mV / 14 mV) and the charger cable (37 mV / 25 mV) exceeded the raw voltage thresholds.
+      * Furthermore, on the charger DC cable, 50 Hz body coupling was high, keeping the BLC 150 Hz ratio below 150%. Therefore, checking BLC alone allowed the charger cable to bypass the SMPS filter!
+    * *The Breakthrough Solution — ALC Active Filter Discriminator*:
+      * The hardware PCB features an active analog low-pass Sallen-Key filter on the ALC channel.
+      * On a genuine 230V mains line (pure utility grid sinusoid), the active filter completely eliminates 150 Hz (`alc_150hz_pct = 0%`).
+      * On a phone charger DC cable, intense common-mode flyback switching pulses and rectifier spikes blow through the filter, producing a massive **33.2% 150 Hz leakage** on ALC.
+    * *Dual-Channel Discriminator Logic*:
+      ```c
+      bool is_smps_charger = (blc_150hz_pct >= 150) || (alc_150hz_pct >= 15);
+      ```
+    * *Result*:
+      1. Phone Charger DC Cable (`alc_150hz_pct = 33.2% >= 15%`): Reliably identified as SMPS noise and forced to `STATUS_SAFE`.
+      2. 230V AC Line (`alc_150hz_pct = 0% < 15%`, BLC = 24 mV >= 15 mV, ALC = 14 mV >= 9 mV): Reliably validated as `STATUS_LIVE`.
+  * **Compilation, Deployment & Hardware Validation**:
+    * Rebuilt firmware cleanly via Ninja toolchain.
+    * Successfully generated signed OTA firmware payload at `build\ACDetector\zephyr\zephyr.signed.bin` (Flash: 95.45%, RAM: 96.63%).
+    * Flashed via OTA (`ota_update.py`) and **validated on physical hardware by user**: 230V AC mains line reliably triggers `STATUS_LIVE`, while the phone charger DC cable is reliably suppressed as `STATUS_SAFE`.
+
+
+
+### 2026-09-18: SLS PA12 230V Signal Analysis Report RCA, ASA FDM Assessment & iOS Deployment Architecture
+* **Subsystem Scope**: Signal Diagnostics & DSP Waveform Analysis, Enclosure Material Roadmap, Cross-Platform Mobile Application (`ac-detector-expo`)
+* **Technical Description**:
+  * **SLS PA12 230V Cable Signal Analysis Report Review (Hyderabad, TS)**:
+    * Analyzed two physical PDF diagnostic signal reports generated by the NCVD mobile app DSP engine on a live 230V mains conductor:
+      1. *Report 1: Without Hand (14:59:11)*: BLC True RMS = **40 mV** (Peak-to-Peak: 189 mV, 50 Hz Mag: 4,881), ALC True RMS = **15 mV** (Peak-to-Peak: 53 mV, 50 Hz Mag: 2,243). ALC Waveform classified as *Complex / Noisy* with THD = 21.23% [HIGH DISTORTION].
+      2. *Report 2: With Hand on Enclosure (15:01:37)*: BLC True RMS surged to **120 mV** (3.0x increase, Peak-to-Peak: 482 mV, 50 Hz Mag: 15,785), ALC True RMS surged to **66 mV** (4.4x increase, Peak-to-Peak: 212 mV, 50 Hz Mag: 9,406). ALC Waveform transitioned to a clean *Distorted Sine* with THD dropping to **14.94% [ACCEPTABLE]**.
+    * *Hardware DC Bias Health*: Both reports confirmed rock-solid DC bias at **1622 mV to 1634 mV** (~1.63 V = Vdd/2), confirming that the MCP601 preamplifiers are operating within their linear region without saturation or clipping.
+    * *Physics & Electrical RCA*:
+      1. *Capacitive Divider Shift (Virtual Earth Grounding)*: When floating in air, the detector's ground reference to earth is small (`C_stray ~ 3 to 5 pF`). Hand contact adds the operator's large body-to-earth capacitance (`C_body_earth ~ 100 to 200 pF`), completing the AC displacement return path and multiplying the effective voltage divider gain across the analog front-end.
+      2. *Direct 50 Hz Antenna Injection*: Operator body acts as an antenna picking up 1 V to 5 V RMS 50 Hz field from ambient indoor wiring. Unshielded SLS PA12 top lid allows capacitive injection (`C_hand ~ 1 to 2 pF`) into high-impedance (> 100 M-ohm) rotary switch wiring.
+      3. *THD Improvement*: The injected 50 Hz fundamental (FFT mag 9,406) overpowered background EMI/SMPS noise, causing the measured waveform to appear as a much purer 50 Hz sinusoid.
+    * *IEC 61243-1 Resolution*: Confirmed that in field operation, the detector must be mounted on an insulating hotstick, and the enclosure requires an internal grounded copper foil Faradic shield under the top lid to eliminate hand coupling.
+  * **ASA (Acrylonitrile Styrene Acrylate) FDM Assessment for IEC 61243-1**:
+    * Evaluated ASA FDM as an alternative to SLS PA12:
+      * *Weathering & UV*: Outstanding outdoor UV resistance (acrylate rubber prevents yellowing and embrittlement in substation switchyards).
+      * *Moisture Absorption*: Very low (< 0.3%, vs 1.5% to 4% in PA12), easily satisfying the 96-hour at 93% RH humidity conditioning test.
+      * *Acetone Vapor Smoothing*: ASA layer lines can be chemical vapor smoothed with acetone to weld seams into a 100% airtight, waterproof IP65/IP67 outer shell.
+      * *Print Settings for Certification*: 5 to 6 solid perimeter walls (>= 3.0 mm to 3.5 mm), 60% to 100% infill for -25 deg C cold drop test, and UL94 V-0 flame-retardant grade (e.g. Kimya ASA-FR) for formal type testing.
+  * **iOS (iPhone) Cross-Platform Deployment Architecture**:
+    * Evaluated running `ac-detector-expo` on Apple iOS / iPhone:
+      * Confirmed that standard *Expo Go* from the App Store cannot run the app because `react-native-ble-plx` requires custom native iOS Bluetooth libraries (`NSBluetoothAlwaysUsageDescription`, `NSBluetoothPeripheralUsageDescription`).
+      * Defined deployment pipeline for Windows development environment using Expo EAS Cloud Build (`eas build --platform ios --profile development`) to compile custom development clients without requiring a local Mac.
+      * Documented necessary `app.json` iOS plugins, permissions, and developer signing requirements.
+
+### 2026-09-17: Enclosure Material Analysis, SLS PA12 Capacitive Coupling RCA & IEC 61243-1 Compliance
+* **Subsystem Scope**: Physical Enclosure Design, Material Science, Electrostatic Shielding, IEC 61243-1 Cl. 4.2 / 4.4 / 4.5 / 4.6 Compliance
+* **Technical Description**:
+  * **Test Phenomenon & Photographic Evidence**:
+    * Performed touch sensitivity diagnostics across multiple enclosure types and operator contact conditions:
+      1. Bare hand placed on black SLS PA12 top lid: Signal surged from baseline (13 mV) to **59 mV BLC / 50 mV ALC**, falsely triggering `STATUS_LIVE` alarm at 230V range.
+      2. Hand resting on yellow 3D printed (FDM) enclosure: Signal remained stable at **18 to 22 mV**, remaining correctly in `STATUS_SAFE`.
+      3. Insulating rubber glove placed on top lid: Signal remained stable at baseline (**18 to 20 mV**), confirming complete dielectric isolation.
+  * **Root Cause Analysis (RCA)**:
+    * Human operator body acts as a parasitic antenna picking up 1 V to 5 V RMS stray 50 Hz electric potential from ambient indoor mains wiring and lighting.
+    * The black SLS PA12 top lid is thin (~1.5 mm to 2.0 mm) and completely unshielded. The bare hand forms a capacitive divider (`C_hand ~ 1 to 2 pF`) directly into the high-impedance (>= 100 M-ohm) analog circuitry, rotary range switch contacts, and wiring located directly beneath the lid.
+    * The yellow FDM housing did not trigger because its thicker walls (3 mm to 4 mm) and internal air infill lattice (air permittivity `epsilon_r = 1.0` vs PA12 `epsilon_r = 3.5 to 4.0`) substantially lowered stray capacitive coupling below the detection threshold.
+    * Wearing high-voltage insulating gloves adds a high series dielectric barrier that drops the effective coupling capacitance to negligible levels.
+  * **IEC 61243-1 Housing Assessment for SLS PA12**:
+    * **Raw SLS PA12 Status**: **Non-compliant for type-certification**. Untreated sintered powder exhibits 3% to 7% open micro-porosity, which fails the mandatory 96-hour at 93% RH climatic humidity test (Cl. 4.4 / 5.4.3), allows moisture tracking under high-voltage gradient fields, and can crack under the 1-meter drop test at -25 deg C (Cl. 4.2 / 5.2.2).
+    * **Commercial Standard**: High-impact, flame-retardant **Polycarbonate (PC)** (e.g., Sabic Lexan 940A / Covestro Makrolon 6557) or **PC/PBT blend** (Sabic Xenoy) via injection molding (< 0.2% water absorption, 30 to 35 kV/mm dielectric strength, UL94 V-0).
+    * **Viable 3D Printing Solutions for IEC 61243-1**:
+      1. *HP Multi Jet Fusion (MJF) PA11 + Automated Chemical Vapor Smoothing (AMT PostPro)*: Fully seals surface micro-porosity to achieve IP67 water-tightness, while PA11 maintains high impact ductility at -25 deg C without shattering.
+      2. *100% Solid Industrial FDM Polycarbonate (PC)*: 6 to 8 solid perimeters, 100% infill; identical polymer to commercial certified units.
+      3. *High-Impact SLA Resins (Henkel Loctite 3D IND405 / Formlabs Tough 1500)*: Liquid photopolymer curing yields 100% solid, non-porous isotropic parts.
+  * **Immediate Hardware Resolution**:
+    * Install an internal Faradic ground shield: line the underside of the top lid (beneath rotary switch, LEDs, buzzer) with adhesive copper foil tape connected directly to circuit Ground (`GND`).
+    * Stray 50 Hz body currents are shunted harmlessly to ground, permanently eliminating false LIVE triggers from hand or glove proximity.
+
+### 2026-09-17: Comprehensive NCVD Mobile App Overhaul, Industrial UI/UX & Audio Architecture
+* **Subsystem Scope**: Mobile Application (`E:\projects\DevelopmentLevelCode\App\ac-detector-expo`), BLE Communication Protocol, Waveform Oscilloscope, Action State Machine, Audio Engine
+* **Technical Description**:
+  * **Branding & Assets**: Modernized identity to "NCVD powered by Fervid Smart". Integrated official NCVD application icon and adaptive launch splash assets.
+  * **BLE Scan Screen (`BleScanScreen.tsx`)**: Redesigned into clean, light-themed card list featuring detected `AC_DETECTOR` units, live 4-bar dynamic RSSI signal indicators, hardware MAC address readout, and instant connection handling.
+  * **Header & Indicator Card (`IndicatorPanel.tsx`)**:
+    * Redesigned top panel to display connected device name, truncated BLE ID, live battery percentage, real-time voltage readout (e.g. `85% (8.12V)`), and a dedicated Power/Disconnect button.
+    * Removed unnecessary speaker/mute icon to eliminate visual clutter.
+    * Implemented dynamic Apple gradient status cards: Green-to-Teal for `STATUS_SAFE`, Red-to-Orange for `STATUS_LIVE`, Amber-to-Yellow for `STATUS_INDUCED`, and Dark-to-Red for `STATUS_FAULT`, complete with vector icons and synchronized pulse animations.
+    * Integrated real-time Voltage Range & Safety Clearance Guide displaying nominal line voltage and Voltrack/IEC safe clearance distances (5 cm for 230V up to 5.0 m for 765kV).
+  * **Waveform Oscilloscope (`WaveformOscilloscope.tsx`)**:
+    * Clean white card presentation with swipeable mode selection: `BLC` (Teal `#00C7BE`), `ALC` (Orange `#FF9500`), and `DUAL` (Overlaid traces).
+    * Integrated live signal statistics banner displaying BLC and ALC Mean (mV) and RMS (mV) values across all modes.
+    * **Monitor vs. Read Differentiation**: In continuous Monitor mode (command `'CS'`), firmware bypasses the 400 raw waveform points to ensure fast < 150 ms response time. The oscilloscope automatically clears stale waveforms and displays a dedicated dashed "MONITORING ACTIVE" container while real-time BLC & ALC values update at 150 ms intervals. In Read mode (command `'R'`), the full 400-point ADC snapshot is captured and plotted.
+  * **Industrial Control Grid (`ControlGrid.tsx`)**:
+    * 4-Button Action Grid: `READ` (Single snapshot), `MONITOR` (Continuous 150ms stream), `ANALYSE` (IEC Harmonics & PDF report), and `AUTO-SCAN` (In-place Step-Down Range Scan).
+    * **Strict Mutual Exclusion**: When any action (`READ`, `MONITOR`, or `AUTO-SCAN`) is active, all other buttons and the voltage range dial (`HorizontalDial.tsx`) are automatically disabled and dimmed (`opacity: 0.35`, `pointerEvents: 'none'`) until the active operation completes or is stopped.
+    * Implemented 2500 ms watchdog safety timeout on single reads to prevent UI lockout on dropped BLE packets.
+  * **Audio Annunciation Refinement (`soundManager.ts`)**:
+    * Completely removed all emergency vehicle, police, and ambulance sirens as well as harsh piercing beeps.
+    * Preserved exclusively the pleasant, descending two-tone acoustic bell chime (`disconnect.wav`, 880 Hz to 587 Hz) with soft exponential decay for disconnection events.
+    * Hardware piezo buzzer on the hotstick continues to serve as the primary acoustic annunciation transducer per IEC 61243-1.
+  * **Build, Packaging & Deployment**:
+    * Configured Android Studio JBR Java 21 environment and ADB TCP reverse port forwarding (`adb reverse tcp:8081 tcp:8081`).
+    * Successfully compiled production standalone Release APK (`BUILD SUCCESSFUL`) and validated deployment directly to connected physical Motorola test hardware via ADB.
+* **Resolution & Implementation**:
+  * Updated `useBLE.ts`, `ControlGrid.tsx`, `IndicatorPanel.tsx`, `WaveformOscilloscope.tsx`, `soundManager.ts`, and `index.tsx`.
+  * Verified 0 errors across `tsc --noEmit` and `expo lint`.
+
+---
+
 ### 2026-09-16: Universal SMPS Harmonic Rejection (All Ranges) & 75% Induced Clamping
 * **Subsystem Scope**: Detection State Machine (`adc_backend.c`), Goertzel Harmonic Discriminator
 * **Technical Description**:
@@ -443,6 +569,13 @@ Extensive testing was conducted across multiple test scenarios ([PDF Reports in 
 * [x] Update GPIO driver in `main.c` / `adc_backend.c` for the 9-State System Indication Matrix (Buzzer P0.06, Red LED U5 P0.05, Blue LED U8 P0.04) (IMPLEMENTED).
 * [x] Expand 150 Hz SMPS harmonic discriminator across all 12 channels (0 – 11) to eliminate room charger interference on 1.1 kV to 25 kV ranges (IMPLEMENTED & COMPILED).
 * [x] Formulate IEC 61243-1 Compliance mapping & CPRI/ERDA 5-step laboratory type-test certification protocol (DOCUMENTED & BENCHMARKED).
-* [ ] Implement 9-State UI and Automated Step-Down Scan in `ac-detector-expo` mobile app.
+* [x] Enclosure material analysis and hand capacitive coupling RCA documented (SLS PA12 vs FDM vs Rubber Gloves).
+* [x] Analyzed live 230V signal reports on SLS PA12 with/without hand touch (documented 3x–4.4x virtual earth coupling gain).
+* [x] Dual-channel 150 Hz SMPS discriminator (ALC filter leakage + BLC dominance) validated on physical hardware (CONFIRMED & WORKING: 230V detected, phone charger DC cable rejected).
+* [ ] Install internal adhesive copper foil ground shield connected to circuit GND under top lid of SLS PA12 enclosure.
+* [ ] Source/test production housing prototype in Vapor-Smoothed HP MJF PA11, Acetone-Smoothed ASA FDM, or 100% Solid Polycarbonate (PC).
+* [ ] Configure `eas.json` and build iOS development client via Expo EAS Cloud Build for iPhone field testing.
 * [ ] Verify induced voltage warning levels on uncharged line adjacent to live 11kV/33kV test rig.
 * [ ] Fine-tune per-channel threshold tables in `g_thresholds` for higher voltage ranges (1.1kV, 11kV, 33kV, 132kV).
+
+
