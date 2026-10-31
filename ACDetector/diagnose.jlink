@@ -1,0 +1,9 @@
+device NRF52832_XXAA
+si SWD
+speed 4000
+connect
+h
+regs
+mem32 0xE000ED28 4
+mem32 20000000 16
+q

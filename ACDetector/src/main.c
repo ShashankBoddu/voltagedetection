@@ -18,7 +18,7 @@ K_THREAD_DEFINE(adc_thread, 2048, adc_thread_fn, NULL, NULL, NULL, 8, 0, 0);
 K_SEM_DEFINE(boot_done_sem, 0, 10);
 
 int main(void) {
-  printk("\n\t\t>> ACDetector V1.0.3 <<\n\n");
+  printk("\n\t\t>> ACDetector V1.0.5 <<\n\n");
 
   /* Initialize Peripherals */
   storage_init(&g_thresholds);

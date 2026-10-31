@@ -14,5 +14,23 @@ extern thresholds_t g_thresholds;
 void adc_get_snapshot(data_t *p_data, int16_t *p_blc, int16_t *p_alc);
 void buzzer_set(bool on);
 void annunciation_boot_selftest(void);
+typedef struct {
+  bool passed;
+  int32_t reported_rms_mv;   // BLC Active RMS
+  int32_t baseline_rms_mv;   // BLC Baseline RMS (before toggle)
+  int32_t delta_rms_mv;      // BLC Net Injected Delta RMS
+  int32_t delta_p2p_mv;      // BLC Net Injected Delta Peak-to-Peak (Step Spike)
+  int32_t delta_50hz_mv;     // BLC Net Injected 50Hz Goertzel Delta
+  int32_t mean_mv;           // BLC DC Bias
+  int32_t p2p_mv;            // BLC Peak-to-Peak
+  int32_t freq_50hz_rms_mv;  // BLC Active 50Hz RMS
+  int32_t alc_rms_mv;        // ALC Active RMS
+  int32_t alc_mean_mv;       // ALC DC Bias
+  int32_t alc_p2p_mv;        // ALC Peak-to-Peak
+  int16_t blc_buf[SAMPLE_COUNT];
+  int16_t alc_buf[SAMPLE_COUNT];
+} selftest_result_t;
+
+bool hardware_kelvin_selftest(selftest_result_t *out_result);
 
 #endif

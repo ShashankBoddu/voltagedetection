@@ -1,0 +1,11 @@
+device NRF52832_XXAA
+si SWD
+speed 4000
+connect
+r
+h
+erase
+loadfile E:\projects\DevelopmentLevelCode\voltagedetection\NRF52\ACDetector\build\merged.hex
+r
+g
+q

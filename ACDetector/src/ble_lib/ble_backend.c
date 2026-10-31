@@ -39,6 +39,7 @@ static struct bt_uuid_128 rx_uuid = BT_UUID_INIT_128(BT_UUID_RX_CHAR_VAL);
 static const struct bt_gatt_attr *tx_attr;
 static bool notify_enabled;
 static bool send_full_data = false;
+static volatile bool send_selftest_data = false;
 
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
@@ -175,6 +176,11 @@ static ssize_t rx_write_cb(struct bt_conn *conn,
     // Relaxed 'C' command (Continuous status)
     send_full_data = false;
     k_sem_give(&ble_tx_sem);
+  } else if (cmd == 'K') {
+    // 'K': Trigger Kelvin Hardware Electrode Self-Test from App
+    printk("BLE Trigger: Queuing Dual-Channel Kelvin Hardware Self-Test...\n");
+    send_selftest_data = true;
+    k_sem_give(&ble_tx_sem);
   }
   return len;
 }
@@ -196,11 +202,20 @@ void ble_send(const char *data, uint16_t len) {
   if (!notify_enabled || !tx_attr) {
     return;
   }
-  int err = bt_gatt_notify(NULL, tx_attr, data, len);
-  if (err == -ENOMEM) {
-    // Retry once after brief delay if BLE controller buffers are momentarily congested
-    k_sleep(K_MSEC(10));
-    bt_gatt_notify(NULL, tx_attr, data, len);
+  int err;
+  int retries = 0;
+  while (retries < 20) {
+    err = bt_gatt_notify(NULL, tx_attr, data, len);
+    if (err == 0) {
+      return; // Successfully queued in BLE controller
+    }
+    if (err == -ENOMEM || err == -ENOBUFS || err == -EAGAIN) {
+      k_sleep(K_MSEC(15)); // Wait for connection event to flush TX buffers
+      retries++;
+    } else {
+      printk("ble_send error: %d\n", err);
+      return;
+    }
   }
 }
 
@@ -251,6 +266,107 @@ void ble_tx_thread_fn(void *arg1, void *arg2, void *arg3) {
   k_sem_take(&boot_done_sem, K_FOREVER);
   while (1) {
     k_sem_take(&ble_tx_sem, K_FOREVER);
+
+    if (send_selftest_data) {
+      send_selftest_data = false;
+      printk("Running Kelvin Self-Test in Dedicated TX Thread...\n");
+      static selftest_result_t res;
+      hardware_kelvin_selftest(&res);
+
+      // 1. Reply with 16-byte Differential Self-Test Diagnostics Packet
+      uint8_t ack[16];
+      ack[0] = 'K';
+      ack[1] = res.passed ? 1 : 0;
+      int16_t blc_active_rms = (int16_t)res.reported_rms_mv;
+      int16_t blc_base_rms   = (int16_t)res.baseline_rms_mv;
+      int16_t blc_delta_rms  = (int16_t)res.delta_rms_mv;
+      int16_t blc_delta_p2p  = (int16_t)res.delta_p2p_mv;
+      int16_t alc_active_rms = (int16_t)res.alc_rms_mv;
+      int16_t blc_p2p        = (int16_t)res.p2p_mv;
+      int16_t alc_p2p        = (int16_t)res.alc_p2p_mv;
+
+      ack[2] = (uint8_t)(blc_active_rms & 0xFF);
+      ack[3] = (uint8_t)((blc_active_rms >> 8) & 0xFF);
+      ack[4] = (uint8_t)(blc_base_rms & 0xFF);
+      ack[5] = (uint8_t)((blc_base_rms >> 8) & 0xFF);
+      ack[6] = (uint8_t)(blc_delta_rms & 0xFF);
+      ack[7] = (uint8_t)((blc_delta_rms >> 8) & 0xFF);
+      ack[8] = (uint8_t)(blc_delta_p2p & 0xFF);
+      ack[9] = (uint8_t)((blc_delta_p2p >> 8) & 0xFF);
+
+      ack[10] = (uint8_t)(alc_active_rms & 0xFF);
+      ack[11] = (uint8_t)((alc_active_rms >> 8) & 0xFF);
+      ack[12] = (uint8_t)(blc_p2p & 0xFF);
+      ack[13] = (uint8_t)((blc_p2p >> 8) & 0xFF);
+      ack[14] = (uint8_t)(alc_p2p & 0xFF);
+      ack[15] = (uint8_t)((alc_p2p >> 8) & 0xFF);
+      ble_send((const char *)ack, sizeof(ack));
+      k_sleep(K_MSEC(25));
+
+      // 2. Stream the exact 200 samples captured while GPIO was actively toggling!
+      // BLC (Core Sensor)
+      k_sleep(K_MSEC(30));
+      for (int i = 0; i < SAMPLE_COUNT; i += SAMPLES_PER_PKT) {
+        pkt.type = PKT_BLC;
+        pkt.start_index = i;
+        pkt.count = MIN(SAMPLES_PER_PKT, SAMPLE_COUNT - i);
+        memset(pkt.samples, 0, sizeof(pkt.samples));
+        for (int j = 0; j < pkt.count; j++) {
+          pkt.samples[j] = res.blc_buf[i + j];
+        }
+        uint16_t pkt_len = offsetof(Data_packet, samples) + pkt.count * sizeof(int16_t);
+        ble_send((const char *)&pkt, pkt_len);
+        k_sleep(K_MSEC(25));
+      }
+
+      k_sleep(K_MSEC(25));
+
+      // ALC (Filtered Output)
+      for (int i = 0; i < SAMPLE_COUNT; i += SAMPLES_PER_PKT) {
+        pkt.type = PKT_ALC;
+        pkt.start_index = i;
+        pkt.count = MIN(SAMPLES_PER_PKT, SAMPLE_COUNT - i);
+        memset(pkt.samples, 0, sizeof(pkt.samples));
+        for (int j = 0; j < pkt.count; j++) {
+          pkt.samples[j] = res.alc_buf[i + j];
+        }
+        uint16_t pkt_len = offsetof(Data_packet, samples) + pkt.count * sizeof(int16_t);
+        ble_send((const char *)&pkt, pkt_len);
+        k_sleep(K_MSEC(25));
+      }
+
+      k_sleep(K_MSEC(25));
+
+      // Stats 1
+      Stats_packet_1 stats1;
+      stats1.type = PKT_STATS_1;
+      stats1.reserved = 0;
+      stats1.Line_detector_Status = res.passed ? STATUS_SAFE : STATUS_FAULT;
+      stats1.battery_percent = g_data.battery_percent;
+      stats1.battery_mv = g_data.battery_mv;
+      stats1.blc_mean_mV = res.mean_mv;
+      stats1.blc_rms_mV = res.reported_rms_mv;
+      ble_send((const char *)&stats1, sizeof(Stats_packet_1));
+      k_sleep(K_MSEC(20));
+
+      // Stats 2
+      Stats_packet_2 stats2;
+      stats2.type = PKT_STATS_2;
+      stats2.alc_mean_mV = res.alc_mean_mv;
+      stats2.alc_rms_mV = res.alc_rms_mv;
+      stats2.selected_range = g_data.selected_range;
+      ble_send((const char *)&stats2, sizeof(Stats_packet_2));
+      k_sleep(K_MSEC(25));
+
+      // End Packet
+      pkt.type = PKT_END;
+      pkt.count = 0;
+      pkt.start_index = 0;
+      uint16_t pkt_len = offsetof(Data_packet, samples) + pkt.count * sizeof(int16_t);
+      ble_send((const char *)&pkt, pkt_len);
+      printk("Self-Test Dual Waveforms Streamed Successfully!\n");
+      continue;
+    }
 
     printk("Starting BLE Transfer...\n");
 

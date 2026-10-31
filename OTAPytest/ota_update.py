@@ -83,13 +83,15 @@ async def run_ota(address, file_path):
                             print(f"Warning: Failed to confirm current image: {conf_resp}")
 
                     # Explicitly erase the secondary slot to avoid "NO_FREE_SLOT" mid-upload
-                    if has_secondary:
-                        print("Erasing secondary slot to ensure it's clean...")
+                    print("Erasing secondary slot to ensure clean flash...")
+                    try:
                         erase_resp = await client.request(ImageErase())
                         if success(erase_resp):
                             print("Secondary slot erased.")
                         else:
-                            print(f"Warning: Failed to erase secondary slot (may already be empty): {erase_resp}")
+                            print(f"Secondary slot erase: {erase_resp}")
+                    except Exception as erase_err:
+                        print(f"Erase note: {erase_err}")
                 
                 # --- Step 2: Upload ---
                 print(f"Uploading firmware ({len(image_data)} bytes)...")
