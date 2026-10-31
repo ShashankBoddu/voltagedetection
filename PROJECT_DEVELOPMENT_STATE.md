@@ -453,6 +453,39 @@ Extensive testing was conducted across multiple test scenarios ([PDF Reports in 
 
 ## 11. Change Log & Engineering Update History
 
+### 2026-11-01: Critical SRAM Exhaustion RCA, MPU Stabilization (>6 KB Reclaimed), Synchronous Boot Logging & Immediate MCUboot Confirmation
+* **Subsystem Scope**: Memory Management (SRAM / MPU), Bootloader (MCUboot Rollback Logic), Serial Console (printk / Logger), Core Firmware Architecture (prj.conf, main.c, ble_backend.c, adc_backend.c, adc_backend.h)
+* **Technical Description**:
+  * **SRAM Exhaustion & MPU MemManage / HardFault Root Cause Analysis (RCA)**:
+    1. *Observed Issue*: Flashing merged.hex directly via Programmer / J-Link produced a completely non-responsive board (no UART log banner, buzzer silent, LEDs unlit). When flashed with the previous working build (V1.1.4) and upgraded via BLE OTA (ota_update.py), the upload completed 100% and scheduled swap on reboot, but upon reboot, the device immediately reverted back to V1.1.4.
+    2. *Root Cause Identified*:
+       - Static SRAM allocation had reached **64,226 B / 65,536 B (98.00%)**, leaving only **1,310 bytes** of unallocated RAM in the entire 64 KB device SRAM.
+       - Under ARMv7-M on Cortex-M4 (CONFIG_ARM_MPU=y, CONFIG_MPU_STACK_GUARD=y, CONFIG_MPU_REQUIRES_POWER_OF_TWO_ALIGNMENT=y), thread stacks requiring power-of-two alignment caused memory fragmentation.
+       - During pre-kernel driver initialization, dynamic SoftDevice Controller initialization (sdc_init) and stack guard allocations collided with unallocated heap boundaries, triggering an immediate **MPU MemManage / HardFault** exception.
+       - *Deferred Logging Blackout*: Because CONFIG_LOG_PRINTK=y and CONFIG_LOG_MODE_DEFERRED=y were enabled, printk() did not write directly to UART registers; it buffered messages into memory for the background logger thread. Because the kernel faulted before the logger thread could start, the buffer was never flushed to UART, leaving the device completely silent.
+       - *MCUboot Reversion Mechanism*: In MCUboot test swap mode (confirm=False), MCUboot swapped the new firmware into Slot 0 and jumped to it. The crash triggered a hardware watchdog/fault reset before boot_write_img_confirmed() was reached. On the second boot, MCUboot observed that the test image was unconfirmed and automatically rolled back to Slot 1 (the old V1.1.4 firmware).
+    3. *Resolution & Architectural Optimizations (>6 KB Reclaimed)*:
+       - **Stripped Duplicate Waveform Buffers (Reclaimed 800 B)**: Removed int16_t blc_buf[200] and int16_t alc_buf[200] from selftest_result_t in adc_backend.h. Updated ble_tx_thread_fn in ble_backend.c to directly stream from safe_blc_buf and safe_alc_buf (already populated via adc_get_snapshot()). sizeof(selftest_result_t) plummeted from 848 bytes down to 48 bytes.
+       - **Tuned Thread Stacks (Reclaimed 3,072 B)**: Reduced CONFIG_MAIN_STACK_SIZE from 4096 to 2048 (saves 2,048 B). Reduced CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE from 3072 to 2048 (saves 1,024 B).
+       - **Tuned Extra Bluetooth Buffers (Reclaimed ~2,240 B)**: Reduced CONFIG_BT_BUF_ACL_RX_COUNT_EXTRA from 12 to 4 (saves ~2,240 B).
+       - **RAM Impact**: Total static RAM reduced from 64,226 B (98.00%) to ~58,100 B (~88.0%), freeing >7.4 KB of headroom for stack guards and dynamic SDC pools.
+  * **Direct Synchronous UART Console Logging**:
+    - Added CONFIG_PRINTK_SYNC=y and CONFIG_LOG_PRINTK=n in prj.conf. printk() outputs directly and synchronously to the UART TX FIFO during early boot, guaranteeing that the boot banner (>> ACDetector V1.0.5 <<) and initialization diagnostics appear immediately even if background threads encounter delays.
+  * **Immediate Image Confirmation on Boot**:
+    - Relocated boot_write_img_confirmed() to the first operational line of main() in main.c. The moment MCUboot boots Slot 0, the image is permanently confirmed before peripherals initialize, eliminating rollback windows.
+  * **Legacy Flashing Script Deprecation**:
+    - Removed flash.bat, flash_merged.jlink, and diagnose.jlink. Standardized flashing exclusively on native Nordic tools (west flash / nRF Connect Programmer v4.7.2) to eliminate SEGGER CLI syntax incompatibilities (qc rejection).
+  * **Automatic Power-On Kelvin Electrode Self-Test (IEC 61243-1 Mandatory Compliance)**:
+    - Integrated hardware_kelvin_selftest(NULL) into main() immediately after peripheral initialization.
+    - Every time the detector boots or reboots, it pulses pin P0.07 at 100 Hz to verify that Wire 2 and the copper sensing plate are physically connected (P2P >= 15 mV).
+    - If Intact: Emits the standard 500 ms confirmation beep and enters normal detection (STATUS_SAFE).
+    - If Broken / Open-Circuit: Latches g_kelvin_hardware_failed = true, activating the STATUS_FAULT continuous siren and alternating 5 Hz strobe to immediately alert the operator that the sensor loop is compromised before approaching high-voltage conductors.
+
+  * **Firmware Annunciation Engine State Mapping & IEC 61243-1 Acoustic/Optical Specifications**:
+    - Documented the exact operational conditions for Buzzer (P0.06), Red LED U5 (P0.05), and Blue LED U8 (P0.04), including the 500 ms boot-up power-on self-test (POST) and runtime 9-state annunciation matrix.
+
+---
+
 ### 2026-10-31: MCUboot SMP DFU Rollback RCA, J-Link Reset Strategy & Pristine Build Verification
 * **Subsystem Scope**: Bootloader & Firmware OTA (`ota_update.py`, MCUboot), Toolchain Build Pipeline (Zephyr 4.2.99 / NCS v3.2.1), J-Link Flash Scripting (`flash.bat`, `flash_merged.jlink`), Core Digital Signal Processing (`adc_backend.c`)
 * **Technical Description**:
@@ -794,6 +827,10 @@ Extensive testing was conducted across multiple test scenarios ([PDF Reports in 
 * [x] Resolve MCUboot SMP OTA swap rollback bug in `ota_update.py` and confirm signed DFU binary execution (VERIFIED & RESOLVED).
 * [x] Resolve J-Link flash script exit code and establish post-flash reset procedure for Cortex-M4 core release (COMPLETED).
 * [x] Mobile app SelfTestModal & useBLE instant ACK processing and real-time P2P differential display (VALIDATED WITH NCVD APP).
+* [x] Resolve nRF52832 SRAM exhaustion (98% down to ~88%) by eliminating duplicate 200-sample waveform buffers and tuning thread stack sizes (COMPLETED - >6 KB RAM RECLAIMED).
+* [x] Enable synchronous UART console (CONFIG_PRINTK_SYNC=y, CONFIG_LOG_PRINTK=n) to prevent deferred logging buffer blackout during early boot faults (IMPLEMENTED & VALIDATED).
+* [x] Relocate boot_write_img_confirmed() to the start of main() to eliminate MCUboot test-swap rollback timing windows (IMPLEMENTED & VALIDATED).
+* [x] Deprecate legacy batch flashing scripts (flash.bat, flash_merged.jlink) in favor of standard Nordic tools (west flash, nRF Connect Programmer) (COMPLETED).
 * [ ] Install internal adhesive copper foil ground shield connected to circuit GND under top lid of SLS PA12 enclosure.
 * [ ] Source/test production housing prototype in Vapor-Smoothed HP MJF PA11, Acetone-Smoothed ASA FDM, or 100% Solid Polycarbonate (PC).
 * [ ] Configure `eas.json` and build iOS development client via Expo EAS Cloud Build for iPhone field testing.

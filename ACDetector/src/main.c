@@ -34,8 +34,17 @@ int main(void) {
   ble_param_init();
   range_param_init();
 
-  /* Comprehensive Boot Self-Test (Buzzer, Red LED U5, Blue LED U8) */
-  annunciation_boot_selftest();
+  /* Automatic Power-On Kelvin Hardware Electrode Continuity Self-Test (IEC 61243-1) */
+  printk("Executing Power-On Kelvin Hardware Self-Test (P0.07 Step Drive)...\n");
+  bool kelvin_ok = hardware_kelvin_selftest(NULL);
+  if (kelvin_ok) {
+    printk("Power-On Self-Test: PASSED (Electrode wire & sensing plate intact).\n");
+    /* Comprehensive Boot Annunciation Verification (500 ms Buzzer, Red LED U5, Blue LED U8) */
+    annunciation_boot_selftest();
+  } else {
+    printk("Power-On Self-Test: FAILED (Electrode wire disconnected / broken loop)!\n");
+    // Hardware failure latched: Detection state machine will sound STATUS_FAULT continuous alarm
+  }
 
   printk("ACDetector Initialized. Releasing threads.\n");
   k_sem_give(&boot_done_sem); // Wakes ADC Thread

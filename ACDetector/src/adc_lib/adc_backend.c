@@ -106,6 +106,7 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
 
   if (!gpio_is_ready_dt(&selftest_drive_spec)) {
     printk("Error: selftest_drive GPIO not ready! Failing self-test for safety.\n");
+    g_kelvin_hardware_failed = true;
     if (out_result) {
       memset(out_result, 0, sizeof(selftest_result_t));
       out_result->passed = false;
@@ -198,6 +199,7 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
 
   if (valid_cycles == 0) {
     printk("Self-Test Error: SAADC reads failed on all cycles\n");
+    g_kelvin_hardware_failed = true;
     if (out_result) {
       memset(out_result, 0, sizeof(selftest_result_t));
     }
@@ -263,10 +265,12 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   }
 
   if (passed) {
+    g_kelvin_hardware_failed = false;
     printk("Kelvin Hardware Self-Test: PASS (Electrodes, leads, and filter intact, delta P2P=%d mV, delta RMS=%d mV)\n",
            delta_p2p_blc, delta_rms_blc);
     return true;
   } else {
+    g_kelvin_hardware_failed = true;
     printk("Kelvin Hardware Self-Test: FAIL (Wire 2 Disconnected / Signal lost, delta P2P=%d mV, delta RMS=%d mV)\n",
            delta_p2p_blc, delta_rms_blc);
     return false;
