@@ -27,8 +27,6 @@ typedef struct {
   int32_t alc_rms_mv;        // ALC Active RMS
   int32_t alc_mean_mv;       // ALC DC Bias
   int32_t alc_p2p_mv;        // ALC Peak-to-Peak
-  int16_t blc_buf[SAMPLE_COUNT];
-  int16_t alc_buf[SAMPLE_COUNT];
 } selftest_result_t;
 
 bool hardware_kelvin_selftest(selftest_result_t *out_result);

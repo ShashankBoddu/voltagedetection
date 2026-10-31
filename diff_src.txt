@@ -1,0 +1,514 @@
+diff --git a/ACDetector/src/adc_lib/adc_backend.c b/ACDetector/src/adc_lib/adc_backend.c
+index 8a298bf..152217a 100644
+--- a/ACDetector/src/adc_lib/adc_backend.c
++++ b/ACDetector/src/adc_lib/adc_backend.c
+@@ -9,6 +9,27 @@
+ #include <zephyr/drivers/gpio.h>
+ #include <zephyr/kernel.h>
+ 
++/* ================= GPIO Specs ================= */
++static const struct device *adc_dev = DEVICE_DT_GET(DT_NODELABEL(adc));
++static const struct gpio_dt_spec buzzer_spec =
++    GPIO_DT_SPEC_GET(DT_NODELABEL(buzzer), gpios);
++
++static const struct gpio_dt_spec DetectionLed_spec =
++    GPIO_DT_SPEC_GET(DT_NODELABEL(lowbat), gpios);
++
++static const struct gpio_dt_spec ble_led_spec =
++    GPIO_DT_SPEC_GET(DT_NODELABEL(blemode), gpios);
++
++static const struct gpio_dt_spec selftest_drive_spec =
++    GPIO_DT_SPEC_GET_OR(DT_NODELABEL(selftest_drive), gpios, {0});
++
++/* ================= ADC Buffers ================= */
++int16_t adc_blc_buf[SAMPLE_COUNT];
++int16_t adc_alc_buf[SAMPLE_COUNT];
++static int16_t published_blc_buf[SAMPLE_COUNT];
++static int16_t published_alc_buf[SAMPLE_COUNT];
++static int16_t adc_bat_buf[16];
++
+ /* ================= ADC config Struct ================= */
+ static struct adc_sequence_options seq_opts_200 = {
+     .interval_us = 100,
+@@ -20,12 +41,6 @@ static struct adc_sequence_options seq_opts_bat = {
+     .extra_samplings = 15,
+ };
+ 
+-int16_t adc_blc_buf[SAMPLE_COUNT];
+-int16_t adc_alc_buf[SAMPLE_COUNT];
+-static int16_t published_blc_buf[SAMPLE_COUNT];
+-static int16_t published_alc_buf[SAMPLE_COUNT];
+-static int16_t adc_bat_buf[16];
+-
+ static struct adc_sequence seq_blc = {
+     .options = &seq_opts_200,
+     .channels = BIT(7), // P0.31 / AIN7
+@@ -50,16 +65,16 @@ static struct adc_sequence seq_bat = {
+     .resolution = 12,
+ };
+ 
+-/* ================= Data Variables ================= */
+-static const struct device *adc_dev = DEVICE_DT_GET(DT_NODELABEL(adc));
+-static const struct gpio_dt_spec buzzer_spec =
+-    GPIO_DT_SPEC_GET(DT_NODELABEL(buzzer), gpios);
+-
+-static const struct gpio_dt_spec DetectionLed_spec =
+-    GPIO_DT_SPEC_GET(DT_NODELABEL(lowbat), gpios);
+-
+-static const struct gpio_dt_spec ble_led_spec =
+-    GPIO_DT_SPEC_GET(DT_NODELABEL(blemode), gpios);
++/* ================= Dedicated 50Hz Hardware Self-Test Timer ================= */
++static volatile bool g_selftest_drive_state = false;
++static void selftest_timer_expiry(struct k_timer *timer_id) {
++  ARG_UNUSED(timer_id);
++  g_selftest_drive_state = !g_selftest_drive_state;
++  if (gpio_is_ready_dt(&selftest_drive_spec)) {
++    gpio_pin_set_dt(&selftest_drive_spec, g_selftest_drive_state ? 1 : 0);
++  }
++}
++static K_TIMER_DEFINE(selftest_timer, selftest_timer_expiry, NULL);
+ 
+ data_t g_data;
+ thresholds_t g_thresholds;
+@@ -75,6 +90,191 @@ void buzzer_set(bool on) {
+   }
+ }
+ 
++static void calc_goertzel_50hz_150hz_rms_mV(int16_t *buf, int count,
++                                            int32_t *out_rms_50,
++                                            int32_t *out_rms_150);
++
++static void calc_mean_rms_p2p_mV(int16_t *buf, int count, int32_t *mean_mV,
++                                 int32_t *rms_mV, int32_t *p2p_mV);
++
++static bool g_kelvin_hardware_failed = false;
++
++static volatile bool g_selftest_active = false;
++
++bool hardware_kelvin_selftest(selftest_result_t *out_result) {
++  printk("=== Starting Differential Kelvin Hardware Self-Test (P0.07 / Pin 23) ===\n");
++
++  if (!gpio_is_ready_dt(&selftest_drive_spec)) {
++    printk("Error: selftest_drive GPIO not ready! Failing self-test for safety.\n");
++    if (out_result) {
++      memset(out_result, 0, sizeof(selftest_result_t));
++      out_result->passed = false;
++    }
++    return false;
++  }
++
++  // Pause background ADC thread from reading SAADC concurrently
++  g_selftest_active = true;
++  k_sleep(K_MSEC(30)); // Allow background thread to finish current cycle
++
++  /* =========================================================================
++   * PHASE 1: Baseline Ambient Capture (GPIO P0.07 High-Z Input / Tri-State)
++   * Measures quiescent ambient noise and any stray grid coupling BEFORE drive.
++   * ========================================================================= */
++  k_timer_stop(&selftest_timer);
++  gpio_pin_configure_dt(&selftest_drive_spec, GPIO_INPUT);
++  k_sleep(K_MSEC(30)); // Settle in high-Z
++
++  int32_t base_50hz_blc = 0, base_150hz_blc = 0, base_mean_blc = 0, base_rms_blc = 0, base_p2p_blc = 0;
++  
++  // Average 2 cycles of baseline
++  int base_samples = 0;
++  int32_t sum_base_rms_blc = 0, sum_base_p2p_blc = 0, sum_base_50hz_blc = 0;
++  for (int b = 0; b < 2; b++) {
++    if (!adc_read(adc_dev, &seq_blc) && !adc_read(adc_dev, &seq_alc)) {
++      calc_goertzel_50hz_150hz_rms_mV(adc_blc_buf, SAMPLE_COUNT, &base_50hz_blc, &base_150hz_blc);
++      calc_mean_rms_p2p_mV(adc_blc_buf, SAMPLE_COUNT, &base_mean_blc, &base_rms_blc, &base_p2p_blc);
++      sum_base_rms_blc += base_rms_blc;
++      sum_base_p2p_blc += base_p2p_blc;
++      sum_base_50hz_blc += base_50hz_blc;
++      base_samples++;
++    }
++  }
++  int32_t avg_base_rms_blc = base_samples ? (sum_base_rms_blc / base_samples) : 0;
++  int32_t avg_base_p2p_blc = base_samples ? (sum_base_p2p_blc / base_samples) : 0;
++  int32_t avg_base_50hz_blc = base_samples ? (sum_base_50hz_blc / base_samples) : 0;
++
++  printk("Kelvin Baseline Ambient: RMS %d mV, P2P %d mV, 50Hz %d mV\n", 
++         avg_base_rms_blc, avg_base_p2p_blc, avg_base_50hz_blc);
++
++  /* =========================================================================
++   * PHASE 2: Option B - Transient Step-Response Pulse Drive (100 Hz / 5 ms Toggles)
++   * Drives fast rising/falling step edges through C_iso (10 pF) & R_iso (10 MΩ)
++   * into Wire 2 to inject transient charge spikes into the copper sensing plate.
++   * ========================================================================= */
++  gpio_pin_configure_dt(&selftest_drive_spec, GPIO_OUTPUT_INACTIVE);
++  g_selftest_drive_state = false;
++  k_timer_start(&selftest_timer, K_NO_WAIT, K_MSEC(5)); // 5 ms toggle = 100 Hz step edges
++  k_sleep(K_MSEC(20)); // Allow step transitions to establish rhythm
++
++  #define SELFTEST_CYCLE_COUNT 4
++  int32_t sum_50hz_blc = 0, sum_total_blc = 0, sum_p2p_blc = 0, sum_mean_blc = 0;
++  int32_t sum_50hz_alc = 0, sum_total_alc = 0, sum_p2p_alc = 0, sum_mean_alc = 0;
++  int valid_cycles = 0;
++
++  for (int cycle = 0; cycle < SELFTEST_CYCLE_COUNT; cycle++) {
++    int err_blc = adc_read(adc_dev, &seq_blc);
++    int err_alc = adc_read(adc_dev, &seq_alc);
++    if (!err_blc && !err_alc) {
++      int32_t c_50hz_blc = 0, c_150hz_blc = 0, c_mean_blc = 0, c_rms_blc = 0, c_p2p_blc = 0;
++      int32_t c_50hz_alc = 0, c_150hz_alc = 0, c_mean_alc = 0, c_rms_alc = 0, c_p2p_alc = 0;
++
++      calc_goertzel_50hz_150hz_rms_mV(adc_blc_buf, SAMPLE_COUNT, &c_50hz_blc, &c_150hz_blc);
++      calc_mean_rms_p2p_mV(adc_blc_buf, SAMPLE_COUNT, &c_mean_blc, &c_rms_blc, &c_p2p_blc);
++
++      calc_goertzel_50hz_150hz_rms_mV(adc_alc_buf, SAMPLE_COUNT, &c_50hz_alc, &c_150hz_alc);
++      calc_mean_rms_p2p_mV(adc_alc_buf, SAMPLE_COUNT, &c_mean_alc, &c_rms_alc, &c_p2p_alc);
++
++      sum_50hz_blc += c_50hz_blc;
++      sum_total_blc += c_rms_blc;
++      sum_p2p_blc += c_p2p_blc;
++      sum_mean_blc += c_mean_blc;
++
++      sum_50hz_alc += c_50hz_alc;
++      sum_total_alc += c_rms_alc;
++      sum_p2p_alc += c_p2p_alc;
++      sum_mean_alc += c_mean_alc;
++      valid_cycles++;
++    }
++  }
++
++  // Stop the step drive timer and return P0.07 to High-Z INPUT (Tri-state)
++  k_timer_stop(&selftest_timer);
++  gpio_pin_set_dt(&selftest_drive_spec, 0);
++  gpio_pin_configure_dt(&selftest_drive_spec, GPIO_INPUT);
++
++  // Resume background ADC thread
++  g_selftest_active = false;
++
++  if (valid_cycles == 0) {
++    printk("Self-Test Error: SAADC reads failed on all cycles\n");
++    if (out_result) {
++      memset(out_result, 0, sizeof(selftest_result_t));
++    }
++    return false;
++  }
++
++  int32_t avg_active_50hz_blc = sum_50hz_blc / valid_cycles;
++  int32_t avg_active_rms_blc = sum_total_blc / valid_cycles;
++  int32_t avg_p2p_blc = sum_p2p_blc / valid_cycles;
++  int32_t avg_mean_blc = sum_mean_blc / valid_cycles;
++
++  int32_t avg_active_50hz_alc = sum_50hz_alc / valid_cycles;
++  int32_t avg_active_rms_alc = sum_total_alc / valid_cycles;
++  int32_t avg_p2p_alc = sum_p2p_alc / valid_cycles;
++  int32_t avg_mean_alc = sum_mean_alc / valid_cycles;
++
++  /* =========================================================================
++   * PHASE 3: Option B Transient Differential Signature Processing
++   * High-frequency transient spikes from 10 pF coupling produce large P2P delta.
++   * ========================================================================= */
++  int32_t delta_p2p_blc = avg_p2p_blc - avg_base_p2p_blc;
++  if (delta_p2p_blc < 0) delta_p2p_blc = 0;
++
++  int32_t delta_rms_blc = avg_active_rms_blc - avg_base_rms_blc;
++  if (delta_rms_blc < 0) delta_rms_blc = 0;
++
++  int32_t delta_50hz_blc = avg_active_50hz_blc - avg_base_50hz_blc;
++  if (delta_50hz_blc < 0) delta_50hz_blc = 0;
++
++  printk("Kelvin Active (Step-Driven): P2P %d mV, RMS %d mV, DC %d mV (ALC P2P: %d mV, ALC 50Hz: %d mV)\n",
++         avg_p2p_blc, avg_active_rms_blc, avg_mean_blc, avg_p2p_alc, avg_active_50hz_alc);
++  printk("Kelvin Differential: Delta P2P %d mV, Delta RMS %d mV\n",
++         delta_p2p_blc, delta_rms_blc);
++
++  // Acceptance criteria (Option B: Transient Step-Response):
++  // When Wire 2 is connected: Step injection produces P2P = 54 mV (well above 15 mV threshold)
++  // When Wire 2 is disconnected: Loop broken -> P2P = 1 mV (< 15 mV threshold -> FAIL)
++  bool passed = (avg_p2p_blc >= 15);
++
++  // Publish active waveforms so app can display the real-time probe trace
++  k_mutex_lock(&data_mutex, K_FOREVER);
++  memcpy(published_blc_buf, adc_blc_buf, sizeof(published_blc_buf));
++  memcpy(published_alc_buf, adc_alc_buf, sizeof(published_alc_buf));
++  g_data.blc_mean_mv = avg_mean_blc;
++  g_data.blc_rms_mv = avg_active_rms_blc;
++  g_data.alc_mean_mv = avg_mean_alc;
++  g_data.alc_rms_mv = avg_active_rms_alc;
++  k_mutex_unlock(&data_mutex);
++
++  if (out_result) {
++    out_result->passed = passed;
++    out_result->reported_rms_mv = avg_active_rms_blc;
++    out_result->baseline_rms_mv = avg_base_rms_blc;
++    out_result->delta_rms_mv = delta_rms_blc;
++    out_result->delta_p2p_mv = (delta_p2p_blc > 0) ? delta_p2p_blc : avg_p2p_blc;
++    out_result->delta_50hz_mv = delta_50hz_blc;
++    out_result->mean_mv = avg_mean_blc;
++    out_result->p2p_mv = avg_p2p_blc;
++    out_result->freq_50hz_rms_mv = avg_active_50hz_blc;
++    out_result->alc_rms_mv = avg_active_rms_alc;
++    out_result->alc_mean_mv = avg_mean_alc;
++    out_result->alc_p2p_mv = avg_p2p_alc;
++    memcpy(out_result->blc_buf, adc_blc_buf, sizeof(out_result->blc_buf));
++    memcpy(out_result->alc_buf, adc_alc_buf, sizeof(out_result->alc_buf));
++  }
++
++  if (passed) {
++    printk("Kelvin Hardware Self-Test: PASS (Electrodes, leads, and filter intact, delta P2P=%d mV, delta RMS=%d mV)\n",
++           delta_p2p_blc, delta_rms_blc);
++    return true;
++  } else {
++    printk("Kelvin Hardware Self-Test: FAIL (Wire 2 Disconnected / Signal lost, delta P2P=%d mV, delta RMS=%d mV)\n",
++           delta_p2p_blc, delta_rms_blc);
++    return false;
++  }
++}
++
+ void annunciation_boot_selftest(void) {
+   printk("Boot Self-Test: Verifying Buzzer, Red LED U5, Blue LED U8...\n");
+   if (gpio_is_ready_dt(&buzzer_spec)) {
+@@ -246,6 +446,12 @@ void adc_param_init(void) {
+     printk("Error: BLE Status LED (Blue U8) GPIO not ready\n");
+   }
+ 
++  // Initialize Kelvin Self-Test Drive Pin P0.07 to safe High-Z Input (Tri-state)
++  if (gpio_is_ready_dt(&selftest_drive_spec)) {
++    gpio_pin_configure_dt(&selftest_drive_spec, GPIO_INPUT);
++    printk("Kelvin Self-Test Drive (P0.07 / Pin 23) initialized in High-Z Input mode\n");
++  }
++
+   // Configure SAADC Channels
+   static struct adc_channel_cfg cfg_blc =
+       ADC_CHANNEL_CFG_DT(DT_NODELABEL(beforelcch));
+@@ -272,13 +478,13 @@ static void update_annunciation(uint8_t status, int32_t batt_mv, bool ble_conn)
+   bool is_low_bat = (batt_mv > 0 && batt_mv < 7350);
+ 
+   if (status == STATUS_FAULT) {
+-    // 9. Hardware Fault (Self-Test Fail / Preamp DC bias abnormal)
++    // 9. Hardware Fault (IEC 61243-1: Kelvin Loop-Back Failure or Preamp Bias Collapse)
+     // Red & Blue LED Alternating Strobe at 5 Hz (period = 200 ms = 20 ticks)
+     uint32_t phase = tick % 20;
+     red_led_out = (phase < 10);
+     blue_led_out = (phase >= 10);
+-    // Rapid short error chirps: 50 ms ON (5 ticks), 150 ms OFF
+-    buzzer_out = (phase < 5);
++    // Continuous solid siren to prevent dangerous false confidence on unverified hardware
++    buzzer_out = true;
+   } else if (status == STATUS_LIVE) {
+     // 6 & 7. LIVE Alarm (Energized Line)
+     buzzer_out = true;  // Continuous loud siren (100% duty)
+@@ -371,6 +577,11 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
+   static int32_t battery_percent = 0;
+ 
+   while (1) {
++    if (g_selftest_active) {
++      k_sleep(K_MSEC(20));
++      continue;
++    }
++
+     /* Check Rotary Switch if in Manual Mode (BLE disconnected) */
+     if (!ble_is_connected()) {
+       range_update_manual();
+@@ -458,7 +669,7 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
+       // Method A Continuous Self-Test: Preamplifier DC Bias Health Check
+       // Nominal MCP601 DC bias is VDD/2 = ~1650 mV.
+       // Abnormal bias (< 800 mV or > 2400 mV) flags sensor plate disconnect or op-amp ESD failure.
+-      bool hw_fault = (g_data.blc_mean_mv < 800 || g_data.blc_mean_mv > 2400);
++      bool hw_fault = (g_data.blc_mean_mv < 800 || g_data.blc_mean_mv > 2400) || g_kelvin_hardware_failed;
+ 
+       // Compute 150 Hz 3rd-Harmonic Distortion Ratio on BLC core antenna
+       int32_t blc_150hz_pct = (g_data.blc_rms_mv > 0) ?
+diff --git a/ACDetector/src/adc_lib/adc_backend.h b/ACDetector/src/adc_lib/adc_backend.h
+index ccbef48..6a911ce 100644
+--- a/ACDetector/src/adc_lib/adc_backend.h
++++ b/ACDetector/src/adc_lib/adc_backend.h
+@@ -14,5 +14,23 @@ extern thresholds_t g_thresholds;
+ void adc_get_snapshot(data_t *p_data, int16_t *p_blc, int16_t *p_alc);
+ void buzzer_set(bool on);
+ void annunciation_boot_selftest(void);
++typedef struct {
++  bool passed;
++  int32_t reported_rms_mv;   // BLC Active RMS
++  int32_t baseline_rms_mv;   // BLC Baseline RMS (before toggle)
++  int32_t delta_rms_mv;      // BLC Net Injected Delta RMS
++  int32_t delta_p2p_mv;      // BLC Net Injected Delta Peak-to-Peak (Step Spike)
++  int32_t delta_50hz_mv;     // BLC Net Injected 50Hz Goertzel Delta
++  int32_t mean_mv;           // BLC DC Bias
++  int32_t p2p_mv;            // BLC Peak-to-Peak
++  int32_t freq_50hz_rms_mv;  // BLC Active 50Hz RMS
++  int32_t alc_rms_mv;        // ALC Active RMS
++  int32_t alc_mean_mv;       // ALC DC Bias
++  int32_t alc_p2p_mv;        // ALC Peak-to-Peak
++  int16_t blc_buf[SAMPLE_COUNT];
++  int16_t alc_buf[SAMPLE_COUNT];
++} selftest_result_t;
++
++bool hardware_kelvin_selftest(selftest_result_t *out_result);
+ 
+ #endif
+diff --git a/ACDetector/src/ble_lib/ble_backend.c b/ACDetector/src/ble_lib/ble_backend.c
+index d0b6110..cb2860b 100644
+--- a/ACDetector/src/ble_lib/ble_backend.c
++++ b/ACDetector/src/ble_lib/ble_backend.c
+@@ -39,6 +39,7 @@ static struct bt_uuid_128 rx_uuid = BT_UUID_INIT_128(BT_UUID_RX_CHAR_VAL);
+ static const struct bt_gatt_attr *tx_attr;
+ static bool notify_enabled;
+ static bool send_full_data = false;
++static volatile bool send_selftest_data = false;
+ 
+ static const struct bt_data ad[] = {
+     BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
+@@ -175,6 +176,11 @@ static ssize_t rx_write_cb(struct bt_conn *conn,
+     // Relaxed 'C' command (Continuous status)
+     send_full_data = false;
+     k_sem_give(&ble_tx_sem);
++  } else if (cmd == 'K') {
++    // 'K': Trigger Kelvin Hardware Electrode Self-Test from App
++    printk("BLE Trigger: Queuing Dual-Channel Kelvin Hardware Self-Test...\n");
++    send_selftest_data = true;
++    k_sem_give(&ble_tx_sem);
+   }
+   return len;
+ }
+@@ -196,11 +202,20 @@ void ble_send(const char *data, uint16_t len) {
+   if (!notify_enabled || !tx_attr) {
+     return;
+   }
+-  int err = bt_gatt_notify(NULL, tx_attr, data, len);
+-  if (err == -ENOMEM) {
+-    // Retry once after brief delay if BLE controller buffers are momentarily congested
+-    k_sleep(K_MSEC(10));
+-    bt_gatt_notify(NULL, tx_attr, data, len);
++  int err;
++  int retries = 0;
++  while (retries < 20) {
++    err = bt_gatt_notify(NULL, tx_attr, data, len);
++    if (err == 0) {
++      return; // Successfully queued in BLE controller
++    }
++    if (err == -ENOMEM || err == -ENOBUFS || err == -EAGAIN) {
++      k_sleep(K_MSEC(15)); // Wait for connection event to flush TX buffers
++      retries++;
++    } else {
++      printk("ble_send error: %d\n", err);
++      return;
++    }
+   }
+ }
+ 
+@@ -252,6 +267,107 @@ void ble_tx_thread_fn(void *arg1, void *arg2, void *arg3) {
+   while (1) {
+     k_sem_take(&ble_tx_sem, K_FOREVER);
+ 
++    if (send_selftest_data) {
++      send_selftest_data = false;
++      printk("Running Kelvin Self-Test in Dedicated TX Thread...\n");
++      static selftest_result_t res;
++      hardware_kelvin_selftest(&res);
++
++      // 1. Reply with 16-byte Differential Self-Test Diagnostics Packet
++      uint8_t ack[16];
++      ack[0] = 'K';
++      ack[1] = res.passed ? 1 : 0;
++      int16_t blc_active_rms = (int16_t)res.reported_rms_mv;
++      int16_t blc_base_rms   = (int16_t)res.baseline_rms_mv;
++      int16_t blc_delta_rms  = (int16_t)res.delta_rms_mv;
++      int16_t blc_delta_p2p  = (int16_t)res.delta_p2p_mv;
++      int16_t alc_active_rms = (int16_t)res.alc_rms_mv;
++      int16_t blc_p2p        = (int16_t)res.p2p_mv;
++      int16_t alc_p2p        = (int16_t)res.alc_p2p_mv;
++
++      ack[2] = (uint8_t)(blc_active_rms & 0xFF);
++      ack[3] = (uint8_t)((blc_active_rms >> 8) & 0xFF);
++      ack[4] = (uint8_t)(blc_base_rms & 0xFF);
++      ack[5] = (uint8_t)((blc_base_rms >> 8) & 0xFF);
++      ack[6] = (uint8_t)(blc_delta_rms & 0xFF);
++      ack[7] = (uint8_t)((blc_delta_rms >> 8) & 0xFF);
++      ack[8] = (uint8_t)(blc_delta_p2p & 0xFF);
++      ack[9] = (uint8_t)((blc_delta_p2p >> 8) & 0xFF);
++
++      ack[10] = (uint8_t)(alc_active_rms & 0xFF);
++      ack[11] = (uint8_t)((alc_active_rms >> 8) & 0xFF);
++      ack[12] = (uint8_t)(blc_p2p & 0xFF);
++      ack[13] = (uint8_t)((blc_p2p >> 8) & 0xFF);
++      ack[14] = (uint8_t)(alc_p2p & 0xFF);
++      ack[15] = (uint8_t)((alc_p2p >> 8) & 0xFF);
++      ble_send((const char *)ack, sizeof(ack));
++      k_sleep(K_MSEC(25));
++
++      // 2. Stream the exact 200 samples captured while GPIO was actively toggling!
++      // BLC (Core Sensor)
++      k_sleep(K_MSEC(30));
++      for (int i = 0; i < SAMPLE_COUNT; i += SAMPLES_PER_PKT) {
++        pkt.type = PKT_BLC;
++        pkt.start_index = i;
++        pkt.count = MIN(SAMPLES_PER_PKT, SAMPLE_COUNT - i);
++        memset(pkt.samples, 0, sizeof(pkt.samples));
++        for (int j = 0; j < pkt.count; j++) {
++          pkt.samples[j] = res.blc_buf[i + j];
++        }
++        uint16_t pkt_len = offsetof(Data_packet, samples) + pkt.count * sizeof(int16_t);
++        ble_send((const char *)&pkt, pkt_len);
++        k_sleep(K_MSEC(25));
++      }
++
++      k_sleep(K_MSEC(25));
++
++      // ALC (Filtered Output)
++      for (int i = 0; i < SAMPLE_COUNT; i += SAMPLES_PER_PKT) {
++        pkt.type = PKT_ALC;
++        pkt.start_index = i;
++        pkt.count = MIN(SAMPLES_PER_PKT, SAMPLE_COUNT - i);
++        memset(pkt.samples, 0, sizeof(pkt.samples));
++        for (int j = 0; j < pkt.count; j++) {
++          pkt.samples[j] = res.alc_buf[i + j];
++        }
++        uint16_t pkt_len = offsetof(Data_packet, samples) + pkt.count * sizeof(int16_t);
++        ble_send((const char *)&pkt, pkt_len);
++        k_sleep(K_MSEC(25));
++      }
++
++      k_sleep(K_MSEC(25));
++
++      // Stats 1
++      Stats_packet_1 stats1;
++      stats1.type = PKT_STATS_1;
++      stats1.reserved = 0;
++      stats1.Line_detector_Status = res.passed ? STATUS_SAFE : STATUS_FAULT;
++      stats1.battery_percent = g_data.battery_percent;
++      stats1.battery_mv = g_data.battery_mv;
++      stats1.blc_mean_mV = res.mean_mv;
++      stats1.blc_rms_mV = res.reported_rms_mv;
++      ble_send((const char *)&stats1, sizeof(Stats_packet_1));
++      k_sleep(K_MSEC(20));
++
++      // Stats 2
++      Stats_packet_2 stats2;
++      stats2.type = PKT_STATS_2;
++      stats2.alc_mean_mV = res.alc_mean_mv;
++      stats2.alc_rms_mV = res.alc_rms_mv;
++      stats2.selected_range = g_data.selected_range;
++      ble_send((const char *)&stats2, sizeof(Stats_packet_2));
++      k_sleep(K_MSEC(25));
++
++      // End Packet
++      pkt.type = PKT_END;
++      pkt.count = 0;
++      pkt.start_index = 0;
++      uint16_t pkt_len = offsetof(Data_packet, samples) + pkt.count * sizeof(int16_t);
++      ble_send((const char *)&pkt, pkt_len);
++      printk("Self-Test Dual Waveforms Streamed Successfully!\n");
++      continue;
++    }
++
+     printk("Starting BLE Transfer...\n");
+ 
+     /* 1. Capture Data Snapshot from ADC Library */
+diff --git a/ACDetector/src/main.c b/ACDetector/src/main.c
+index 37e53e8..6186ca8 100644
+--- a/ACDetector/src/main.c
++++ b/ACDetector/src/main.c
+@@ -18,7 +18,7 @@ K_THREAD_DEFINE(adc_thread, 2048, adc_thread_fn, NULL, NULL, NULL, 8, 0, 0);
+ K_SEM_DEFINE(boot_done_sem, 0, 10);
+ 
+ int main(void) {
+-  printk("\n\t\t>> ACDetector V1.0.3 <<\n\n");
++  printk("\n\t\t>> ACDetector V1.0.5 <<\n\n");
+ 
+   /* Initialize Peripherals */
+   storage_init(&g_thresholds);

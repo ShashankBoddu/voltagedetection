@@ -18,21 +18,21 @@ K_THREAD_DEFINE(adc_thread, 2048, adc_thread_fn, NULL, NULL, NULL, 8, 0, 0);
 K_SEM_DEFINE(boot_done_sem, 0, 10);
 
 int main(void) {
-  printk("\n\t\t>> ACDetector V1.0.5 <<\n\n");
-
-  /* Initialize Peripherals */
-  storage_init(&g_thresholds);
-  adc_param_init();
-  ble_param_init();
-  range_param_init();
-
-  /* Confirm the image to prevent MCUboot from reverting */
+  /* Confirm the image immediately to prevent MCUboot from reverting */
   int err = boot_write_img_confirmed();
   if (err) {
     printk("Failed to confirm image: %d\n", err);
   } else {
     printk("Image successfully confirmed.\n");
   }
+
+  printk("\n\t\t>> ACDetector V1.1.6 <<\n\n");
+
+  /* Initialize Peripherals */
+  storage_init(&g_thresholds);
+  adc_param_init();
+  ble_param_init();
+  range_param_init();
 
   /* Comprehensive Boot Self-Test (Buzzer, Red LED U5, Blue LED U8) */
   annunciation_boot_selftest();

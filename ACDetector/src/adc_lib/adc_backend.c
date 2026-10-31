@@ -260,8 +260,6 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
     out_result->alc_rms_mv = avg_active_rms_alc;
     out_result->alc_mean_mv = avg_mean_alc;
     out_result->alc_p2p_mv = avg_p2p_alc;
-    memcpy(out_result->blc_buf, adc_blc_buf, sizeof(out_result->blc_buf));
-    memcpy(out_result->alc_buf, adc_alc_buf, sizeof(out_result->alc_buf));
   }
 
   if (passed) {

@@ -273,6 +273,10 @@ void ble_tx_thread_fn(void *arg1, void *arg2, void *arg3) {
       static selftest_result_t res;
       hardware_kelvin_selftest(&res);
 
+      /* Snapshot the waveforms captured by hardware_kelvin_selftest into safe buffers */
+      data_t dummy_snap;
+      adc_get_snapshot(&dummy_snap, safe_blc_buf, safe_alc_buf);
+
       // 1. Reply with 16-byte Differential Self-Test Diagnostics Packet
       uint8_t ack[16];
       ack[0] = 'K';
@@ -312,7 +316,7 @@ void ble_tx_thread_fn(void *arg1, void *arg2, void *arg3) {
         pkt.count = MIN(SAMPLES_PER_PKT, SAMPLE_COUNT - i);
         memset(pkt.samples, 0, sizeof(pkt.samples));
         for (int j = 0; j < pkt.count; j++) {
-          pkt.samples[j] = res.blc_buf[i + j];
+          pkt.samples[j] = safe_blc_buf[i + j];
         }
         uint16_t pkt_len = offsetof(Data_packet, samples) + pkt.count * sizeof(int16_t);
         ble_send((const char *)&pkt, pkt_len);
@@ -328,7 +332,7 @@ void ble_tx_thread_fn(void *arg1, void *arg2, void *arg3) {
         pkt.count = MIN(SAMPLES_PER_PKT, SAMPLE_COUNT - i);
         memset(pkt.samples, 0, sizeof(pkt.samples));
         for (int j = 0; j < pkt.count; j++) {
-          pkt.samples[j] = res.alc_buf[i + j];
+          pkt.samples[j] = safe_alc_buf[i + j];
         }
         uint16_t pkt_len = offsetof(Data_packet, samples) + pkt.count * sizeof(int16_t);
         ble_send((const char *)&pkt, pkt_len);
