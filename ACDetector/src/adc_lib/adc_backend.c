@@ -130,24 +130,29 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
    * PHASE 1: Baseline Ambient Capture (GPIO P0.07 High-Z Input / Tri-State)
    * Measures quiescent ambient noise and any stray grid coupling BEFORE drive.
    * Uses dual Goertzel: 50 Hz (grid ambient) and 100 Hz (quiescent floor).
+   * Measures both BLC (core sensor) and ALC (filtered sensor) baseline.
    * ========================================================================= */
   k_timer_stop(&selftest_timer);
   gpio_pin_configure_dt(&selftest_drive_spec, GPIO_INPUT);
   k_sleep(K_MSEC(30)); // Settle in high-Z
 
   int32_t base_50hz_blc = 0, base_100hz_blc = 0, base_mean_blc = 0, base_rms_blc = 0, base_p2p_blc = 0;
+  int32_t base_mean_alc = 0, base_rms_alc = 0, base_p2p_alc = 0;
   
   // Average 2 cycles of baseline
   int base_samples = 0;
   int32_t sum_base_rms_blc = 0, sum_base_p2p_blc = 0, sum_base_50hz_blc = 0, sum_base_100hz_blc = 0;
+  int32_t sum_base_p2p_alc = 0;
   for (int b = 0; b < 2; b++) {
     if (!adc_read(adc_dev, &seq_blc) && !adc_read(adc_dev, &seq_alc)) {
       calc_goertzel_50hz_100hz_rms_mV(adc_blc_buf, SAMPLE_COUNT, &base_50hz_blc, &base_100hz_blc);
       calc_mean_rms_p2p_mV(adc_blc_buf, SAMPLE_COUNT, &base_mean_blc, &base_rms_blc, &base_p2p_blc);
+      calc_mean_rms_p2p_mV(adc_alc_buf, SAMPLE_COUNT, &base_mean_alc, &base_rms_alc, &base_p2p_alc);
       sum_base_rms_blc += base_rms_blc;
       sum_base_p2p_blc += base_p2p_blc;
       sum_base_50hz_blc += base_50hz_blc;
       sum_base_100hz_blc += base_100hz_blc;
+      sum_base_p2p_alc += base_p2p_alc;
       base_samples++;
     }
   }
@@ -155,9 +160,10 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   int32_t avg_base_p2p_blc = base_samples ? (sum_base_p2p_blc / base_samples) : 0;
   int32_t avg_base_50hz_blc = base_samples ? (sum_base_50hz_blc / base_samples) : 0;
   int32_t avg_base_100hz_blc = base_samples ? (sum_base_100hz_blc / base_samples) : 0;
+  int32_t avg_base_p2p_alc = base_samples ? (sum_base_p2p_alc / base_samples) : 0;
 
-  printk("Kelvin Baseline Ambient: RMS %d mV, P2P %d mV, 50Hz %d mV, 100Hz %d mV\n", 
-         avg_base_rms_blc, avg_base_p2p_blc, avg_base_50hz_blc, avg_base_100hz_blc);
+  printk("Kelvin Baseline Ambient: BLC RMS %d mV, P2P %d mV, 50Hz %d mV, 100Hz %d mV | ALC P2P %d mV\n", 
+         avg_base_rms_blc, avg_base_p2p_blc, avg_base_50hz_blc, avg_base_100hz_blc, avg_base_p2p_alc);
 
   /* =========================================================================
    * PHASE 2: Transient Step-Response Pulse Drive (100 Hz / 5 ms Toggles)
@@ -263,6 +269,7 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   int32_t avg_mean_alc = sum_mean_alc / valid_cycles;
 
   int32_t avg_active_samples = sum_active_samples / valid_cycles;
+  ARG_UNUSED(avg_active_samples);
 
   /* Update published mean and RMS under mutex */
   k_mutex_lock(&data_mutex, K_FOREVER);
@@ -273,9 +280,9 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   k_mutex_unlock(&data_mutex);
 
   /* =========================================================================
-   * PHASE 3: 5-Point Industrial Standard Evaluation Suite (100 Hz Lock-In)
+   * PHASE 3: Coincident Dual-Channel & 100 Hz Lock-In Evaluation Suite
    * Prevents false passes (e.g. from stray PCB capacitive spikes or live 50 Hz fields)
-   * and prevents false fails on intact hardware.
+   * and prevents false fails on intact hardware (R_limit:10k, R_div:10k, C_iso:2.2nF, R_iso:10M).
    * ========================================================================= */
   int32_t delta_p2p_blc = avg_p2p_blc - avg_base_p2p_blc;
   if (delta_p2p_blc < 0) delta_p2p_blc = 0;
@@ -286,33 +293,36 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   int32_t delta_100hz_blc = avg_active_100hz_blc - avg_base_100hz_blc;
   if (delta_100hz_blc < 0) delta_100hz_blc = 0;
 
+  int32_t delta_alc_p2p = avg_p2p_alc - avg_base_p2p_alc;
+  if (delta_alc_p2p < 0) delta_alc_p2p = 0;
+
   // Calculate ALC/BLC attenuation ratio percentage (integer math)
   int32_t alc_blc_ratio_pct = (avg_p2p_blc > 0) ? ((avg_p2p_alc * 100) / avg_p2p_blc) : 0;
 
   // RULE 1: Core BLC Peak-to-Peak Amplitude Floor
   // Intact Wire 2 delivers true capacitive charge: measured P2P ~ 211 to 216 mV
-  // Disconnected Wire 2 only has stray PCB needle spikes: measured P2P ~ 16 to 110 mV
-  bool rule1_blc_amp = (avg_p2p_blc >= 150);
+  // Disconnected Wire 2 only has stray PCB needle spikes: measured P2P ~ 64 to 81 mV
+  bool rule1_blc_amp = (avg_p2p_blc >= 140);
 
-  // RULE 2: Filtered ALC Channel Floor
-  // Hardware RC low-pass filter (220 ohm, 10 uF) integrates intact 100 Hz pulses: measured P2P ~ 36 to 37 mV
-  // Narrow stray needle spikes carry no energy and are suppressed: measured P2P ~ 2 to 3 mV
-  bool rule2_alc_amp = (avg_p2p_alc >= 15);
+  // RULE 2: Filtered ALC Channel Floor & Injected Delta
+  // Hardware RC low-pass filter (220 ohm, 10 uF) integrates intact 100 Hz pulses: measured P2P ~ 36 to 37 mV (delta ~ 35 mV)
+  // Narrow stray needle spikes carry no energy and are suppressed: measured P2P ~ 2 mV (delta ~ 0 mV)
+  bool rule2_alc_amp = (avg_p2p_alc >= 15 && delta_alc_p2p >= 10);
 
   // RULE 3: Dual-Channel Filter Ratio (ALC / BLC)
-  // Intact loop ratio is nominally ~16.8% to 17.5% (36-37 mV on 211-216 mV BLC)
-  // Disconnected needle ratio is only ~2.7% to 4.5%
-  bool rule3_ratio = (alc_blc_ratio_pct >= 10 && alc_blc_ratio_pct <= 50);
+  // Intact loop ratio is nominally ~16.8% to 17.5% (37 mV on 212 mV BLC)
+  // Disconnected needle ratio is only ~2.4% to 4.5% (2 mV on 81 mV BLC)
+  bool rule3_ratio = (alc_blc_ratio_pct >= 8 && alc_blc_ratio_pct <= 45);
 
-  // RULE 4: Sustained Injected 100 Hz Lock-In Energy & Pulse Duration
-  // Intact loop injects sustained 100 Hz fundamental: delta_100hz_blc >= 15 mV OR delta RMS >= 15 mV OR samples >= 5
-  // Disconnected stray needles carry almost zero 100 Hz fundamental energy (delta 100Hz <= 4 mV, delta RMS <= 4 mV, samples 1-2)
-  bool rule4_pulse_energy = (delta_100hz_blc >= 15 || delta_rms_blc >= 15 || avg_active_samples >= 5);
+  // RULE 4: Sustained Injected 100 Hz Lock-In Energy & Coincident Confirmation
+  // Intact loop injects sustained 100 Hz fundamental: delta 100Hz >= 25 mV OR coincident (BLC >= 150 && ALC >= 20)
+  // Disconnected stray needles carry almost zero 100 Hz fundamental (delta 100Hz <= 4 mV, ALC ~ 2 mV)
+  bool rule4_pulse_energy = (delta_100hz_blc >= 25 || (avg_p2p_blc >= 150 && avg_p2p_alc >= 20));
 
   // RULE 5: Preamp DC Bias Operating Point
-  // MCP601 virtual ground must be within normal linear dynamic range (1100 to 2200 mV)
-  bool rule5_dc_bias = (avg_mean_blc >= 1100 && avg_mean_blc <= 2200) &&
-                       (avg_mean_alc >= 1100 && avg_mean_alc <= 2200);
+  // MCP601 virtual ground must be within normal linear dynamic range (800 to 2500 mV)
+  bool rule5_dc_bias = (avg_mean_blc >= 800 && avg_mean_blc <= 2500) &&
+                       (avg_mean_alc >= 800 && avg_mean_alc <= 2500);
 
   // Safety Inhibit: Reject if ambient 50 Hz electric field is excessive (> 60 mV P2P or > 25 mV RMS)
   bool rule_ambient_safe = (avg_base_p2p_blc <= 60 && avg_base_rms_blc <= 25);
@@ -337,14 +347,14 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
 
   if (passed) {
     g_kelvin_hardware_failed = false;
-    printk("Kelvin Hardware Self-Test: PASS (All 5 Industrial Rules OK: BLC=%d mV [>=150], ALC=%d mV [>=15], 100Hz_d=%d mV, Ratio=%d%% [10-50%%], dRMS=%d mV, Pts=%d)\n",
-           avg_p2p_blc, avg_p2p_alc, delta_100hz_blc, alc_blc_ratio_pct, delta_rms_blc, avg_active_samples);
+    printk("Kelvin Hardware Self-Test: PASS (All Rules OK: BLC=%d mV [>=140], ALC=%d mV [>=15, d=%d], 100Hz_d=%d mV, Ratio=%d%% [8-45%%])\n",
+           avg_p2p_blc, avg_p2p_alc, delta_alc_p2p, delta_100hz_blc, alc_blc_ratio_pct);
     return true;
   } else {
     g_kelvin_hardware_failed = true;
-    printk("Kelvin Hardware Self-Test: FAIL (R1_BLC:%d, R2_ALC:%d, R3_Ratio:%d, R4_Energy:%d, R5_DC:%d, AmbSafe:%d) [BLC=%d mV, ALC=%d mV, 100Hz_d=%d mV, Ratio=%d%%, dRMS=%d mV, Pts=%d]\n",
+    printk("Kelvin Hardware Self-Test: FAIL (R1_BLC:%d, R2_ALC:%d, R3_Ratio:%d, R4_100Hz:%d, R5_DC:%d, AmbSafe:%d) [BLC=%d mV, ALC=%d mV, dALC=%d, 100Hz_d=%d mV, Ratio=%d%%]\n",
            rule1_blc_amp, rule2_alc_amp, rule3_ratio, rule4_pulse_energy, rule5_dc_bias, rule_ambient_safe,
-           avg_p2p_blc, avg_p2p_alc, delta_100hz_blc, alc_blc_ratio_pct, delta_rms_blc, avg_active_samples);
+           avg_p2p_blc, avg_p2p_alc, delta_alc_p2p, delta_100hz_blc, alc_blc_ratio_pct);
     return false;
   }
 }

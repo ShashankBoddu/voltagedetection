@@ -163,8 +163,8 @@ async def main():
     try:
         await run_ota(address, args.file)
         if args.verify:
-            print("\nWaiting 5 seconds for device to complete boot...")
-            await asyncio.sleep(5.0)
+            print("\nWaiting 10 seconds for device to complete boot...")
+            await asyncio.sleep(10.0)
             from test_device import ACDetectorTester, scan_for_device, TX_CHAR_UUID
             new_addr = await scan_for_device(args.name)
             if new_addr:
