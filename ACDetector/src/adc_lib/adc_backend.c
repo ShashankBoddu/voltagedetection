@@ -327,14 +327,34 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   bool rule5_dc_bias = (avg_mean_blc >= 800 && avg_mean_blc <= 2500) &&
                        (avg_mean_alc >= 800 && avg_mean_alc <= 2500);
 
-  // Safety Inhibit: Reject if ambient 50 Hz electric field is excessive (> 60 mV P2P or > 25 mV RMS)
-  bool rule_ambient_safe = (avg_base_p2p_blc <= 60 && avg_base_rms_blc <= 25);
+  // Check if strong 100 Hz square wave was injected and cleanly recovered by lock-in filter
+  bool strong_100hz_lockin = (delta_100hz_blc >= 25 && delta_p2p_blc >= 100 && avg_active_rms_alc >= 15);
+
+  // Safety Inhibit:
+  // In quiet air: baseline must be low (<= 60 mV P2P and <= 25 mV RMS).
+  // Near AC cable with acceptable interference: If a strong 100 Hz square wave is cleanly resolved,
+  // allow ambient baseline up to 50 mV RMS / 130 mV P2P.
+  bool ambient_quiet = (avg_base_p2p_blc <= 60 && avg_base_rms_blc <= 25);
+  bool ambient_acceptable = (avg_base_p2p_blc <= 130 && avg_base_rms_blc <= 50) && strong_100hz_lockin;
+  bool rule_ambient_safe = ambient_quiet || ambient_acceptable;
 
   bool passed = rule1_blc_amp && rule2_alc_amp && rule3_ratio && 
                 rule4_pulse_energy && rule5_dc_bias && rule_ambient_safe;
 
+  uint8_t status_code;
+  if (passed) {
+    status_code = 1; // Passed
+  } else if (!rule_ambient_safe || avg_base_rms_blc > 25) {
+    status_code = 2; // Near AC Line (ambient AC interference too high)
+  } else if (!rule5_dc_bias) {
+    status_code = 3; // Hardware Damaged (preamp virtual ground bias failure)
+  } else {
+    status_code = 0; // Sensor Damaged (wire disconnected / open loop)
+  }
+
   if (out_result) {
     out_result->passed = passed;
+    out_result->status_code = status_code;
     out_result->reported_rms_mv = avg_active_rms_blc;
     out_result->baseline_rms_mv = avg_base_rms_blc;
     out_result->delta_rms_mv = delta_rms_blc;

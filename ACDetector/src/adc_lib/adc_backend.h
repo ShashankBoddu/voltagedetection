@@ -16,6 +16,7 @@ void buzzer_set(bool on);
 void annunciation_boot_selftest(void);
 typedef struct {
   bool passed;
+  uint8_t status_code;       // 1 = Pass, 0 = Sensor Damaged, 2 = Near AC Line, 3 = Hardware Damaged
   int32_t reported_rms_mv;   // BLC Active RMS
   int32_t baseline_rms_mv;   // BLC Baseline RMS (before toggle)
   int32_t delta_rms_mv;      // BLC Net Injected Delta RMS

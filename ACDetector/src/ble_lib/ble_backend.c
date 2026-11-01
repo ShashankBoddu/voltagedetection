@@ -274,7 +274,7 @@ void ble_tx_thread_fn(void *arg1, void *arg2, void *arg3) {
 
     if (send_version_data) {
       send_version_data = false;
-      static const char ver_resp[] = "VER:V0.1";
+      static const char ver_resp[] = "VER:V1";
       ble_send(ver_resp, sizeof(ver_resp) - 1);
       printk("Sent Version Response: %s\n", ver_resp);
     }
@@ -292,7 +292,7 @@ void ble_tx_thread_fn(void *arg1, void *arg2, void *arg3) {
       // 1. Reply with 20-byte Differential Self-Test Diagnostics Packet
       uint8_t ack[20];
       ack[0] = 'K';
-      ack[1] = res.passed ? 1 : 0;
+      ack[1] = res.status_code; // 1 = Pass, 0 = Sensor Damaged, 2 = Near AC Line, 3 = Hardware Damaged
       int16_t blc_active_rms  = (int16_t)res.reported_rms_mv;
       int16_t blc_base_rms    = (int16_t)res.baseline_rms_mv;
       int16_t blc_delta_rms   = (int16_t)res.delta_rms_mv;
