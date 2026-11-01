@@ -150,7 +150,7 @@ async def main():
     parser = argparse.ArgumentParser(description="OTA DFU Update Script for nRF52")
     parser.add_argument("--name", default=DEFAULT_DEVICE_NAME, help="Name or Address of the BLE device")
     parser.add_argument("--file", default=DEFAULT_FILE_PATH, help="Path to the firmware file")
-    parser.add_argument("--verify", action="store_true", help="Automatically verify firmware version & run self-test after reboot")
+    parser.add_argument("--verify", action="store_true", help="Automatically verify firmware version after reboot")
     
     args = parser.parse_args()
 
@@ -163,8 +163,8 @@ async def main():
     try:
         await run_ota(address, args.file)
         if args.verify:
-            print("\nWaiting 10 seconds for device to complete boot & power-on self-test...")
-            await asyncio.sleep(10.0)
+            print("\nWaiting 5 seconds for device to complete boot...")
+            await asyncio.sleep(5.0)
             from test_device import ACDetectorTester, scan_for_device, TX_CHAR_UUID
             new_addr = await scan_for_device(args.name)
             if new_addr:
@@ -182,10 +182,8 @@ async def main():
                     ver = await tester.query_version(client)
                     if ver:
                         print(f"Firmware Version: {ver}")
-                    await asyncio.sleep(0.5)
-                    await tester.run_kelvin_selftest(client)
-                    tester.print_selftest_report()
                     await client.stop_notify(TX_CHAR_UUID)
+                print("=" * 60)
     except Exception as e:
         print(f"\nCaught unexpected error: {e}")
 
