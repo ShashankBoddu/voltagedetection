@@ -120,6 +120,9 @@ async def run_ota(address, file_path):
                     print(f"Warning: Failed to mark image pending using hash. Response: {swap_resp}")
                 else:
                     print("Image marked as pending. Swap will occur on reboot.")
+                    if hasattr(swap_resp, 'images'):
+                        for img in swap_resp.images:
+                            print(f"    Slot {img.slot}: hash={img.hash.hex()[:8]}... pending={getattr(img, 'pending', False)} confirmed={getattr(img, 'confirmed', False)}")
 
                 print("Resetting device to apply update...")
                 reset_resp = await client.request(ResetWrite())
@@ -160,8 +163,8 @@ async def main():
     try:
         await run_ota(address, args.file)
         if args.verify:
-            print("\nWaiting 4 seconds for device to complete boot & power-on self-test...")
-            await asyncio.sleep(4.0)
+            print("\nWaiting 10 seconds for device to complete boot & power-on self-test...")
+            await asyncio.sleep(10.0)
             from test_device import ACDetectorTester, scan_for_device, TX_CHAR_UUID
             new_addr = await scan_for_device(args.name)
             if new_addr:
@@ -179,6 +182,7 @@ async def main():
                     ver = await tester.query_version(client)
                     if ver:
                         print(f"Firmware Version: {ver}")
+                    await asyncio.sleep(0.5)
                     await tester.run_kelvin_selftest(client)
                     tester.print_selftest_report()
                     await client.stop_notify(TX_CHAR_UUID)

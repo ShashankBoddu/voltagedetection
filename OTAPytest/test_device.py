@@ -148,11 +148,17 @@ class ACDetectorTester:
                 resp = await client.request(ImageStatesRead())
                 if success(resp):
                     for img in getattr(resp, 'images', []):
-                        if getattr(img, 'slot', -1) == 0:
-                            info["slot"] = 0
-                            hash_bytes = getattr(img, 'hash', b'')
-                            info["hash"] = hash_bytes.hex()[:16] + "..." if hash_bytes else "Unknown"
-                            info["confirmed"] = getattr(img, 'confirmed', False)
+                        slot_num = getattr(img, 'slot', 0)
+                        hash_bytes = getattr(img, 'hash', b'')
+                        h_str = hash_bytes.hex()[:16] + "..." if hash_bytes else "Unknown"
+                        is_active = getattr(img, 'active', False)
+                        is_conf = getattr(img, 'confirmed', False)
+                        is_pend = getattr(img, 'pending', False)
+                        print(f"    Slot {slot_num}: Hash={h_str} Active={is_active} Confirmed={is_conf} Pending={is_pend}")
+                        if is_active or (info["slot"] == "Unknown" and slot_num == 0):
+                            info["slot"] = slot_num
+                            info["hash"] = h_str
+                            info["confirmed"] = is_conf
                             info["version"] = getattr(img, 'version', "N/A")
         except Exception as e:
             info["error"] = str(e)
