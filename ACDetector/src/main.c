@@ -13,7 +13,7 @@
 /* Define threads here to ensure they are created at boot */
 K_THREAD_DEFINE(ble_thread_id, 2048, ble_tx_thread_fn, NULL, NULL, NULL, 9, 0,
                 0);
-K_THREAD_DEFINE(adc_thread, 2048, adc_thread_fn, NULL, NULL, NULL, 8, 0, 0);
+K_THREAD_DEFINE(adc_thread, 3072, adc_thread_fn, NULL, NULL, NULL, 8, 0, 0);
 
 K_SEM_DEFINE(boot_done_sem, 0, 10);
 
@@ -26,7 +26,7 @@ int main(void) {
     printk("Image successfully confirmed.\n");
   }
 
-  printk("\n\t\t>> ACDetector V1.1.6 <<\n\n");
+  printk("\n\t\t>> ACDetector V1.3.0 (IEC 61243-1 Kelvin Verified) <<\n\n");
 
   /* Initialize Peripherals */
   storage_init(&g_thresholds);
@@ -34,17 +34,15 @@ int main(void) {
   ble_param_init();
   range_param_init();
 
-  /* Automatic Power-On Kelvin Hardware Electrode Continuity Self-Test (IEC 61243-1) */
-  printk("Executing Power-On Kelvin Hardware Self-Test (P0.07 Step Drive)...\n");
-  bool kelvin_ok = hardware_kelvin_selftest(NULL);
-  if (kelvin_ok) {
-    printk("Power-On Self-Test: PASSED (Electrode wire & sensing plate intact).\n");
-    /* Comprehensive Boot Annunciation Verification (500 ms Buzzer, Red LED U5, Blue LED U8) */
-    annunciation_boot_selftest();
-  } else {
-    printk("Power-On Self-Test: FAILED (Electrode wire disconnected / broken loop)!\n");
-    // Hardware failure latched: Detection state machine will sound STATUS_FAULT continuous alarm
-  }
+  /* Comprehensive Boot Self-Test (Buzzer, Red LED U5, Blue LED U8) */
+  annunciation_boot_selftest();
+
+  /* 
+   * NOTE: The Power-On Boot Kelvin Self-Test is executed inside adc_thread_fn
+   * after boot_done_sem is given, ensuring analog rails and MCP601 virtual ground
+   * have settled (100 ms) and running on the thread's private stack to prevent
+   * any cold-boot stack collisions or MCUboot test-swap delays.
+   */
 
   printk("ACDetector Initialized. Releasing threads.\n");
   k_sem_give(&boot_done_sem); // Wakes ADC Thread

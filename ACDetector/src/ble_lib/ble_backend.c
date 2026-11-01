@@ -40,6 +40,7 @@ static const struct bt_gatt_attr *tx_attr;
 static bool notify_enabled;
 static bool send_full_data = false;
 static volatile bool send_selftest_data = false;
+static volatile bool send_version_data = false;
 
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
@@ -82,8 +83,6 @@ static void connected(struct bt_conn *conn, uint8_t err) {
 static void disconnected(struct bt_conn *conn, uint8_t reason) {
   printk("BLE disconnected (reason %u)\n", reason);
 
-  notify_enabled = false;
-
   if (current_conn == conn) {
     bt_conn_unref(current_conn);
     current_conn = NULL;
@@ -116,9 +115,6 @@ void ble_send(const char *data, uint16_t len);
 static ssize_t rx_write_cb(struct bt_conn *conn,
                            const struct bt_gatt_attr *attr, const void *buf,
                            uint16_t len, uint16_t offset, uint8_t flags) {
-  if (len == 0 || buf == NULL) {
-    return len;
-  }
   uint8_t *data = (uint8_t *)buf;
   char cmd = data[0];
   printk("RX CMD: %c\n", cmd);
@@ -185,6 +181,10 @@ static ssize_t rx_write_cb(struct bt_conn *conn,
     // 'K': Trigger Kelvin Hardware Electrode Self-Test from App
     printk("BLE Trigger: Queuing Dual-Channel Kelvin Hardware Self-Test...\n");
     send_selftest_data = true;
+    k_sem_give(&ble_tx_sem);
+  } else if (cmd == 'V') {
+    // 'V': Query Firmware Version
+    send_version_data = true;
     k_sem_give(&ble_tx_sem);
   }
   return len;
@@ -271,6 +271,13 @@ void ble_tx_thread_fn(void *arg1, void *arg2, void *arg3) {
   k_sem_take(&boot_done_sem, K_FOREVER);
   while (1) {
     k_sem_take(&ble_tx_sem, K_FOREVER);
+
+    if (send_version_data) {
+      send_version_data = false;
+      static const char ver_resp[] = "VER:V0.5";
+      ble_send(ver_resp, sizeof(ver_resp) - 1);
+      printk("Sent Version Response: %s\n", ver_resp);
+    }
 
     if (send_selftest_data) {
       send_selftest_data = false;
