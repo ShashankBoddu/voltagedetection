@@ -149,26 +149,29 @@ class ACDetectorTester:
         """Read active MCUboot slot, SHA-256 hash, and confirmed flag via SMP protocol."""
         print("--> Querying Active MCUboot Image State via SMP...")
         info = {"slot": "Unknown", "hash": "Unknown", "confirmed": False, "version": "Unknown"}
-        try:
-            transport = SMPBLETransport()
-            async with SMPClient(transport, self.address) as client:
-                resp = await client.request(ImageStatesRead())
-                if success(resp):
-                    for img in getattr(resp, 'images', []):
-                        slot_num = getattr(img, 'slot', 0)
-                        hash_bytes = getattr(img, 'hash', b'')
-                        h_str = hash_bytes.hex()[:16] + "..." if hash_bytes else "Unknown"
-                        is_active = getattr(img, 'active', False)
-                        is_conf = getattr(img, 'confirmed', False)
-                        is_pend = getattr(img, 'pending', False)
-                        print(f"    Slot {slot_num}: Hash={h_str} Active={is_active} Confirmed={is_conf} Pending={is_pend}")
-                        if is_active or (info["slot"] == "Unknown" and slot_num == 0):
-                            info["slot"] = slot_num
-                            info["hash"] = h_str
-                            info["confirmed"] = is_conf
-                            info["version"] = getattr(img, 'version', "N/A")
-        except Exception as e:
-            info["error"] = str(e)
+        for attempt in range(2):
+            try:
+                transport = SMPBLETransport()
+                async with SMPClient(transport, self.address) as client:
+                    resp = await client.request(ImageStatesRead())
+                    if success(resp):
+                        for img in getattr(resp, 'images', []):
+                            slot_num = getattr(img, 'slot', 0)
+                            hash_bytes = getattr(img, 'hash', b'')
+                            h_str = hash_bytes.hex()[:16] + "..." if hash_bytes else "Unknown"
+                            is_active = getattr(img, 'active', False)
+                            is_conf = getattr(img, 'confirmed', False)
+                            is_pend = getattr(img, 'pending', False)
+                            print(f"    Slot {slot_num}: Hash={h_str} Active={is_active} Confirmed={is_conf} Pending={is_pend}")
+                            if is_active or (info["slot"] == "Unknown" and slot_num == 0):
+                                info["slot"] = slot_num
+                                info["hash"] = h_str
+                                info["confirmed"] = is_conf
+                                info["version"] = getattr(img, 'version', "N/A")
+                        break
+            except Exception as e:
+                info["error"] = str(e)
+                await asyncio.sleep(1.5)
         return info
 
     async def run_kelvin_selftest(self, client: BleakClient, timeout: float = 6.0) -> bool:

@@ -117,9 +117,13 @@ async def run_ota(address, file_path):
                 swap_resp = await client.request(ImageStatesWrite(hash=image_hash))
                 
                 if not success(swap_resp):
+                    # If test swap is rejected (e.g. error 33), attempt permanent swap with confirm=True
+                    swap_resp = await client.request(ImageStatesWrite(hash=image_hash, confirm=True))
+
+                if not success(swap_resp):
                     print(f"Warning: Failed to mark image pending using hash. Response: {swap_resp}")
                 else:
-                    print("Image marked as pending. Swap will occur on reboot.")
+                    print("Image marked as pending/confirmed. Swap will occur on reboot.")
                     if hasattr(swap_resp, 'images'):
                         for img in swap_resp.images:
                             print(f"    Slot {img.slot}: hash={img.hash.hex()[:8]}... pending={getattr(img, 'pending', False)} confirmed={getattr(img, 'confirmed', False)}")
@@ -163,7 +167,7 @@ async def main():
     try:
         await run_ota(address, args.file)
         if args.verify:
-            print("\nWaiting 10 seconds for device to complete boot...")
+            print("\nWaiting 10seconds for device to complete boot...")
             await asyncio.sleep(10.0)
             from test_device import ACDetectorTester, scan_for_device, TX_CHAR_UUID
             new_addr = await scan_for_device(args.name)
