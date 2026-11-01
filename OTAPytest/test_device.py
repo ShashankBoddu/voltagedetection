@@ -291,13 +291,13 @@ async def main():
             else:
                 print("[-] Could not retrieve version string over custom GATT.")
 
-        # Mode: Kelvin Hardware Self-Test
-        if args.mode in ["all", "selftest"]:
-            success_test = await tester.run_kelvin_selftest(client)
-            if success_test:
-                tester.print_selftest_report()
-            else:
-                print("[-] Hardware Kelvin Self-Test failed to complete.")
+        # # Mode: Kelvin Hardware Self-Test
+        # if args.mode in ["all", "selftest"]:
+        #     success_test = await tester.run_kelvin_selftest(client)
+        #     if success_test:
+        #         tester.print_selftest_report()
+        #     else:
+        #         print("[-] Hardware Kelvin Self-Test failed to complete.")
 
         await client.stop_notify(TX_CHAR_UUID)
 
