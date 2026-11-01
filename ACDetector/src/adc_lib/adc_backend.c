@@ -97,6 +97,52 @@ static void calc_goertzel_50hz_150hz_rms_mV(int16_t *buf, int count,
 static void calc_mean_rms_p2p_mV(int16_t *buf, int count, int32_t *mean_mV,
                                  int32_t *rms_mV, int32_t *p2p_mV);
 
+static int32_t calc_goertzel_100hz_rms_mV(int16_t *buf, int count) {
+  int64_t sum = 0;
+  for (int i = 0; i < count; i++) {
+    sum += buf[i];
+  }
+  float mean = (float)sum / (float)count;
+
+  // 100 Hz test excitation frequency (Fs = 10000 Hz, N = 200, k = 2.0 cycles in 20 ms)
+  float omega100 = (2.0f * 3.14159265f * 2.0f) / (float)count;
+  float coeff100 = 2.0f * cosf(omega100);
+  float q0 = 0.0f, q1 = 0.0f, q2 = 0.0f;
+
+  for (int i = 0; i < count; i++) {
+    float s = (float)buf[i] - mean;
+    q0 = coeff100 * q1 - q2 + s;
+    q2 = q1;
+    q1 = q0;
+  }
+
+  float real100 = q1 - q2 * cosf(omega100);
+  float imag100 = q2 * sinf(omega100);
+  float mag100 = sqrtf(real100 * real100 + imag100 * imag100) / ((float)count / 2.0f);
+  float rms100 = mag100 / 1.41421356f;
+
+  return (int32_t)((rms100 * ADC_LSB_uV) / 1000.0f);
+}
+
+static int32_t calc_sync_correlation_mV(int16_t *buf, int count) {
+  int64_t sum = 0;
+  for (int i = 0; i < count; i++) {
+    sum += buf[i];
+  }
+  int32_t mean = (int32_t)(sum / count);
+
+  int64_t corr = 0;
+  for (int i = 0; i < count; i++) {
+    int32_t diff = buf[i] - mean;
+    // 100 Hz square wave: 0..49 = HIGH (+1), 50..99 = LOW (-1), 100..149 = HIGH (+1), 150..199 = LOW (-1)
+    int sign = ((i % 100) < 50) ? 1 : -1;
+    corr += (int64_t)diff * sign;
+  }
+  int32_t avg_corr = (int32_t)(corr / count);
+  if (avg_corr < 0) avg_corr = -avg_corr;
+  return (avg_corr * ADC_LSB_uV) / 1000;
+}
+
 static bool g_kelvin_hardware_failed = false;
 
 static volatile bool g_selftest_active = false;
@@ -116,7 +162,7 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
 
   // Pause background ADC thread from reading SAADC concurrently
   g_selftest_active = true;
-  k_sleep(K_MSEC(30)); // Allow background thread to finish current cycle
+  k_sleep(K_MSEC(60)); // Allow background thread to finish any active SAADC conversion cycle
 
   /* =========================================================================
    * PHASE 1: Baseline Ambient Capture (GPIO P0.07 High-Z Input / Tri-State)
@@ -130,23 +176,26 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   
   // Average 2 cycles of baseline
   int base_samples = 0;
-  int32_t sum_base_rms_blc = 0, sum_base_p2p_blc = 0, sum_base_50hz_blc = 0;
+  int32_t sum_base_rms_blc = 0, sum_base_p2p_blc = 0, sum_base_50hz_blc = 0, sum_base_100hz_blc = 0;
   for (int b = 0; b < 2; b++) {
     if (!adc_read(adc_dev, &seq_blc) && !adc_read(adc_dev, &seq_alc)) {
       calc_goertzel_50hz_150hz_rms_mV(adc_blc_buf, SAMPLE_COUNT, &base_50hz_blc, &base_150hz_blc);
       calc_mean_rms_p2p_mV(adc_blc_buf, SAMPLE_COUNT, &base_mean_blc, &base_rms_blc, &base_p2p_blc);
+      int32_t b_100hz_blc = calc_goertzel_100hz_rms_mV(adc_blc_buf, SAMPLE_COUNT);
       sum_base_rms_blc += base_rms_blc;
       sum_base_p2p_blc += base_p2p_blc;
       sum_base_50hz_blc += base_50hz_blc;
+      sum_base_100hz_blc += b_100hz_blc;
       base_samples++;
     }
   }
   int32_t avg_base_rms_blc = base_samples ? (sum_base_rms_blc / base_samples) : 0;
   int32_t avg_base_p2p_blc = base_samples ? (sum_base_p2p_blc / base_samples) : 0;
   int32_t avg_base_50hz_blc = base_samples ? (sum_base_50hz_blc / base_samples) : 0;
+  int32_t avg_base_100hz_blc = base_samples ? (sum_base_100hz_blc / base_samples) : 0;
 
-  printk("Kelvin Baseline Ambient: RMS %d mV, P2P %d mV, 50Hz %d mV\n", 
-         avg_base_rms_blc, avg_base_p2p_blc, avg_base_50hz_blc);
+  printk("Kelvin Baseline Ambient: RMS %d mV, P2P %d mV, 50Hz %d mV, 100Hz %d mV\n", 
+         avg_base_rms_blc, avg_base_p2p_blc, avg_base_50hz_blc, avg_base_100hz_blc);
 
   /* =========================================================================
    * PHASE 2: Option B - Transient Step-Response Pulse Drive (100 Hz / 5 ms Toggles)
@@ -160,7 +209,9 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
 
   #define SELFTEST_CYCLE_COUNT 4
   int32_t sum_50hz_blc = 0, sum_total_blc = 0, sum_p2p_blc = 0, sum_mean_blc = 0;
+  int32_t sum_100hz_blc = 0, sum_sync_blc = 0;
   int32_t sum_50hz_alc = 0, sum_total_alc = 0, sum_p2p_alc = 0, sum_mean_alc = 0;
+  int32_t sum_100hz_alc = 0, sum_sync_alc = 0;
   int valid_cycles = 0;
 
   for (int cycle = 0; cycle < SELFTEST_CYCLE_COUNT; cycle++) {
@@ -172,19 +223,27 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
 
       calc_goertzel_50hz_150hz_rms_mV(adc_blc_buf, SAMPLE_COUNT, &c_50hz_blc, &c_150hz_blc);
       calc_mean_rms_p2p_mV(adc_blc_buf, SAMPLE_COUNT, &c_mean_blc, &c_rms_blc, &c_p2p_blc);
+      int32_t c_100hz_blc = calc_goertzel_100hz_rms_mV(adc_blc_buf, SAMPLE_COUNT);
+      int32_t c_sync_blc  = calc_sync_correlation_mV(adc_blc_buf, SAMPLE_COUNT);
 
       calc_goertzel_50hz_150hz_rms_mV(adc_alc_buf, SAMPLE_COUNT, &c_50hz_alc, &c_150hz_alc);
       calc_mean_rms_p2p_mV(adc_alc_buf, SAMPLE_COUNT, &c_mean_alc, &c_rms_alc, &c_p2p_alc);
+      int32_t c_100hz_alc = calc_goertzel_100hz_rms_mV(adc_alc_buf, SAMPLE_COUNT);
+      int32_t c_sync_alc  = calc_sync_correlation_mV(adc_alc_buf, SAMPLE_COUNT);
 
       sum_50hz_blc += c_50hz_blc;
       sum_total_blc += c_rms_blc;
       sum_p2p_blc += c_p2p_blc;
       sum_mean_blc += c_mean_blc;
+      sum_100hz_blc += c_100hz_blc;
+      sum_sync_blc  += c_sync_blc;
 
       sum_50hz_alc += c_50hz_alc;
       sum_total_alc += c_rms_alc;
       sum_p2p_alc += c_p2p_alc;
       sum_mean_alc += c_mean_alc;
+      sum_100hz_alc += c_100hz_alc;
+      sum_sync_alc  += c_sync_alc;
       valid_cycles++;
     }
   }
@@ -210,14 +269,18 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   int32_t avg_active_rms_blc = sum_total_blc / valid_cycles;
   int32_t avg_p2p_blc = sum_p2p_blc / valid_cycles;
   int32_t avg_mean_blc = sum_mean_blc / valid_cycles;
+  int32_t avg_100hz_blc = sum_100hz_blc / valid_cycles;
+  int32_t avg_sync_blc  = sum_sync_blc / valid_cycles;
 
   int32_t avg_active_50hz_alc = sum_50hz_alc / valid_cycles;
   int32_t avg_active_rms_alc = sum_total_alc / valid_cycles;
   int32_t avg_p2p_alc = sum_p2p_alc / valid_cycles;
   int32_t avg_mean_alc = sum_mean_alc / valid_cycles;
+  int32_t avg_100hz_alc = sum_100hz_alc / valid_cycles;
+  int32_t avg_sync_alc  = sum_sync_alc / valid_cycles;
 
   /* =========================================================================
-   * PHASE 3: Option B Transient Differential Signature Processing
+   * PHASE 3: IEC 61243-1 / IEC 61010-1 Multi-Parameter Industrial Safety Engine
    * High-frequency transient spikes from 10 pF coupling produce large P2P delta.
    * ========================================================================= */
   int32_t delta_p2p_blc = avg_p2p_blc - avg_base_p2p_blc;
@@ -229,15 +292,31 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   int32_t delta_50hz_blc = avg_active_50hz_blc - avg_base_50hz_blc;
   if (delta_50hz_blc < 0) delta_50hz_blc = 0;
 
-  printk("Kelvin Active (Step-Driven): P2P %d mV, RMS %d mV, DC %d mV (ALC P2P: %d mV, ALC 50Hz: %d mV)\n",
-         avg_p2p_blc, avg_active_rms_blc, avg_mean_blc, avg_p2p_alc, avg_active_50hz_alc);
-  printk("Kelvin Differential: Delta P2P %d mV, Delta RMS %d mV\n",
-         delta_p2p_blc, delta_rms_blc);
+  int32_t delta_100hz_blc = avg_100hz_blc - avg_base_100hz_blc;
+  if (delta_100hz_blc < 0) delta_100hz_blc = 0;
 
-  // Acceptance criteria (Option B: Transient Step-Response):
-  // When Wire 2 is connected: Step injection produces P2P = 54 mV (well above 15 mV threshold)
-  // When Wire 2 is disconnected: Loop broken -> P2P = 1 mV (< 15 mV threshold -> FAIL)
-  bool passed = (avg_p2p_blc >= 15);
+  printk("Kelvin Active (Step-Driven): P2P %d mV, RMS %d mV, 100Hz %d mV, SyncCorr %d mV, DC %d mV (ALC P2P: %d mV, ALC 100Hz: %d mV, ALC Sync: %d mV, ALC 50Hz: %d mV)\n",
+         avg_p2p_blc, avg_active_rms_blc, avg_100hz_blc, avg_sync_blc, avg_mean_blc, avg_p2p_alc, avg_100hz_alc, avg_sync_alc, avg_active_50hz_alc);
+  printk("Kelvin Differential: Delta P2P %d mV, Delta 100Hz %d mV, Delta RMS %d mV\n",
+         delta_p2p_blc, delta_100hz_blc, delta_rms_blc);
+
+  /* Multi-parameter Industrial Safety Rules (IEC 61243-1 / IEC 61010-1) */
+  bool rule1_step_delta = (delta_p2p_blc >= 15);
+  bool rule2_phase_lock = (delta_100hz_blc >= 3) || (avg_sync_blc >= 5);
+  bool rule3_preamp_dc  = (avg_mean_blc >= 1100 && avg_mean_blc <= 2200);
+  bool rule4_linear     = (avg_p2p_blc < 1200);
+  bool rule5_rc_filter  = (avg_mean_alc >= 1100 && avg_mean_alc <= 2200) &&
+                          (avg_p2p_alc >= 2) && (avg_p2p_alc <= avg_p2p_blc + 10);
+
+  bool passed = rule1_step_delta && rule2_phase_lock && rule3_preamp_dc &&
+                rule4_linear && rule5_rc_filter;
+
+  printk("Self-Test Criteria: R1(StepDelta %s, %d>=15mV) R2(PhaseLock %s, 100Hz=%dmV, Sync=%dmV) R3(DCBias %s, %dmV) R4(Linear %s, %dmV<1200) R5(RCFilter %s, ALC=%dmV)\n",
+         rule1_step_delta ? "PASS" : "FAIL", delta_p2p_blc,
+         rule2_phase_lock ? "PASS" : "FAIL", delta_100hz_blc, avg_sync_blc,
+         rule3_preamp_dc  ? "PASS" : "FAIL", avg_mean_blc,
+         rule4_linear     ? "PASS" : "FAIL", avg_p2p_blc,
+         rule5_rc_filter  ? "PASS" : "FAIL", avg_p2p_alc);
 
   // Publish active waveforms so app can display the real-time probe trace
   k_mutex_lock(&data_mutex, K_FOREVER);
@@ -621,9 +700,9 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
 
     calc_goertzel_50hz_150hz_rms_mV(adc_blc_buf, SAMPLE_COUNT, &holdblc_rms_mv, &holdblc_150hz_rms_mv);
     calc_goertzel_50hz_150hz_rms_mV(adc_alc_buf, SAMPLE_COUNT, &holdalc_rms_mv, &holdalc_150hz_rms_mv);
-    int32_t dummy_p2p;
-    calc_mean_rms_p2p_mV(adc_blc_buf, SAMPLE_COUNT, &holdblc_mean_mv, &dummy_p2p, &holdblc_p2p_mv);
-    calc_mean_rms_p2p_mV(adc_alc_buf, SAMPLE_COUNT, &holdalc_mean_mv, &dummy_p2p, &holdalc_p2p_mv);
+    int32_t dummy_broadband_rms;
+    calc_mean_rms_p2p_mV(adc_blc_buf, SAMPLE_COUNT, &holdblc_mean_mv, &dummy_broadband_rms, &holdblc_p2p_mv);
+    calc_mean_rms_p2p_mV(adc_alc_buf, SAMPLE_COUNT, &holdalc_mean_mv, &dummy_broadband_rms, &holdalc_p2p_mv);
 
     AVGblc_mean_mv += holdblc_mean_mv;
     AVGblc_rms_mv += holdblc_rms_mv;

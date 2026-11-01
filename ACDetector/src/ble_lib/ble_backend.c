@@ -82,6 +82,8 @@ static void connected(struct bt_conn *conn, uint8_t err) {
 static void disconnected(struct bt_conn *conn, uint8_t reason) {
   printk("BLE disconnected (reason %u)\n", reason);
 
+  notify_enabled = false;
+
   if (current_conn == conn) {
     bt_conn_unref(current_conn);
     current_conn = NULL;
@@ -114,6 +116,9 @@ void ble_send(const char *data, uint16_t len);
 static ssize_t rx_write_cb(struct bt_conn *conn,
                            const struct bt_gatt_attr *attr, const void *buf,
                            uint16_t len, uint16_t offset, uint8_t flags) {
+  if (len == 0 || buf == NULL) {
+    return len;
+  }
   uint8_t *data = (uint8_t *)buf;
   char cmd = data[0];
   printk("RX CMD: %c\n", cmd);

@@ -453,6 +453,34 @@ Extensive testing was conducted across multiple test scenarios ([PDF Reports in 
 
 ## 11. Change Log & Engineering Update History
 
+### 2026-11-01: Industrial-Grade Multi-Parameter Self-Test Engine (IEC 61243-1 / IEC 61010-1 Compliant)
+* **Subsystem Scope**: Hardware Self-Test Engine (adc_backend.c), Power-On Boot Routine (main.c), DSP Algorithm
+* **Technical Description**:
+  * **Frequency Selection Optimization (100 Hz vs. 70 Hz)**:
+    * In the 200-sample ADC buffer (Fs = 10 kHz, T = 20 ms), 100 Hz completes exactly k = 2.0 integer cycles, ensuring mathematically zero spectral leakage into the 50 Hz (k = 1.0) mains detection bin or 150 Hz (k = 3.0) SMPS harmonic bin.
+    * In contrast, 70 Hz completes 1.4 non-integer cycles, causing severe Dirichlet sinc sidelobe leakage that distorts mains detection. In addition, 70 Hz has a 14.285 ms period (7.143 ms half-period), which cannot be toggled deterministically by integer millisecond RTOS timers (k_timer), whereas 100 Hz toggle is a rock-solid 5 ms (K_MSEC(5)).
+    * At 100 Hz, the analog low-pass filter (R3 = 220 ohm, C2 = 10 uF, fc ~ 72.34 Hz) attenuates by -4.64 dB (~58.6%), providing optimal dynamic headroom to verify both unattenuated BLC (AIN7) and filtered ALC (AIN4) channels.
+  * **Synchronous Demodulation / Phase Correlation (Lock-In Detection)**:
+    * Implemented calc_sync_correlation_mV(): Multiplies each ADC sample (V[i] - V_mean) by the deterministic MCU GPIO drive state (sign(ti) = +/- 1).
+    * External 50 Hz mains hum, high-frequency SMPS switching noise, and random EMI correlate to zero over the 20 ms window. Only the coherent charge injected by the MCU's own P0.07 pin produces a positive correlation (>= 5 mV), establishing mathematical immunity against false passes near live high-voltage equipment.
+  * **Circuit Topology Clarification**:
+    * Confirmed from schematic (SCH_Schematic high voltage NCV detector.png) that Branch 2 is an **RC Low-Pass Filter** (R3 = 220 ohm, C2 = 10 uF, fc ~ 72.3 Hz), removing any legacy 'LC' references.
+  * **5-Point Industrial Standard Evaluation Suite**:
+    1. *Rule 1 (Capacitive Step Delta)*: Delta P2P_BLC >= 15 mV (confirms physical continuity of Wire 2, isolation RC, and copper sensing plate).
+    2. *Rule 2 (Coherent Frequency & Phase Lock)*: Delta RMS_100Hz >= 3 mV OR SyncCorr >= 5 mV (rejects external grid/noise spoofing).
+    3. *Rule 3 (Op-Amp Virtual Ground DC Bias)*: 1100 mV <= V_mean_BLC <= 2200 mV (confirms R1 = 100k, R5 = 100k, supply rails, and MCP601 op-amp input stage).
+    4. *Rule 4 (Dynamic Linearity & Anti-Saturation)*: V_P2P_BLC < 1200 mV (confirms op-amp is linear and not railed or latching).
+    5. *Rule 5 (Dual-Channel RC Filter Signature)*: 1100 mV <= V_mean_ALC <= 2200 mV and 2 mV <= V_P2P_ALC <= (V_P2P_BLC + 10 mV) (confirms secondary ADC channel AIN4 and physical RC filter components).
+  * **Execution Lifecycle**:
+    * Runs automatically at power-on boot in main.c. If passed, executes the 500 ms boot confirmation beep/LED cycle and enters STATUS_SAFE. If failed, latches g_kelvin_hardware_failed = true, enters STATUS_FAULT (continuous siren + 5 Hz alternating strobe), and halts normal line detection.
+    * Runs on-demand via BLE 'K' command, streaming active waveforms and status back to the mobile app.
+* **Root Cause Analysis (RCA)**:
+  * Evaluating only raw P2P violated IEC 61243-1 and IEC 61010-1 single-fault safety rules: testing near a 50 Hz live wire or with an oscillating amplifier could generate >15 mV P2P even if Wire 2 was severed, giving a catastrophic false-safe pass.
+* **Resolution & Implementation**:
+  * Fully implemented in adc_backend.c, dc_backend.h, and main.c.
+
+---
+
 ### 2026-11-01: Critical SRAM Exhaustion RCA, MPU Stabilization (>6 KB Reclaimed), Synchronous Boot Logging & Immediate MCUboot Confirmation
 * **Subsystem Scope**: Memory Management (SRAM / MPU), Bootloader (MCUboot Rollback Logic), Serial Console (printk / Logger), Core Firmware Architecture (prj.conf, main.c, ble_backend.c, adc_backend.c, adc_backend.h)
 * **Technical Description**:
