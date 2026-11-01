@@ -49,7 +49,7 @@ Memory region         Used Size  Region Size  %age Used
 
 * **Flash Utilization**: 214,676 B / 224,768 B (95.51%). 10,092 bytes free in Slot 0 partition.
 * **RAM Footprint**: 59,202 B / 65,536 B (90.34%). 6,334 bytes free RAM. Dynamic stack guard protection via ARM Cortex-M4 MPU.
-* **MCUboot Signed Image**: `zephyr.signed.bin` (215,524 bytes), SHA-256: `5459a49795a927987d7e6d3a484484cb573d0f1ca35797f5f499d90b25269ca9`.
+* **MCUboot Signed Image**: `zephyr.signed.bin` (215,524 bytes), SHA-256: `fca19564fcff9097f42966f52f0ffa5fc942aed9a41d9cb66fe158e23659102e`.
 * **Version String Broadcast**: `"VER:V0.8"` in `ble_backend.c`.
 * **Stack Allocations**:
   - `CONFIG_MAIN_STACK_SIZE=2048`
@@ -158,7 +158,7 @@ $$\text{MCU GPIO (P0.07)} \rightarrow \text{Wire 2} \rightarrow \text{Solder Joi
 
    | Rule | Evaluated Metric | Acceptance Range | Connected (Pass) | Disconnected (Fail) | Purpose & Failure Mode Prevented |
    | :--- | :--- | :--- | :---: | :---: | :--- |
-   | **Rule 1** | **BLC Peak-to-Peak** | $\ge 130\text{ mV}$ | **$211\text{ to }216\text{ mV}$** | **$64\text{ to }81\text{ mV}$** | Proves physical charge injection through Wire 2 $\rightarrow$ Plate $\rightarrow$ Wire 1. 130 mV floor provides massive 49 mV margin above open-circuit needle spike (81 mV). |
+   | **Rule 1** | **BLC Injected Delta & Floor** | $\Delta\text{P2P}\ge 110\text{ mV} \land \text{P2P}\ge 130\text{ mV}$ | **$\Delta\approx +212\text{ mV}, \text{P2P}\approx 214\text{ mV}$** | **$\Delta\le +73\text{ mV}, \text{P2P}\le 77\text{ mV}$** | Net differential delta ($\text{Active} - \text{Baseline}$) cancels ambient common-mode EMI noise. True charge injection through Wire 2 $\rightarrow$ Plate $\rightarrow$ Wire 1. Massive 92 mV safety headroom. |
    | **Rule 2** | **ALC Filtered Output & Delta** | $(\text{RMS}\ge 12 \lor \text{P2P}\ge 20) \land \Delta\text{ALC}\ge 8$ | **$\text{RMS}\approx 36\text{ mV}, \text{P2P}\approx 90\text{ mV}$** | **$\text{RMS}\le 2\text{ mV}, \text{P2P}\le 4\text{ mV}$** | Hardware RC low-pass filter ($220\,\Omega, 10\,\mu\text{F}$) completely wipes out narrow spikes. **$>18\times$ physical signal separation**. |
    | **Rule 3** | **Dual-Channel Ratio** | $8\% \le \frac{\text{ALC}}{\text{BLC}} \le 75\%$ | **$42\%\text{ to }48\%$** | **$2.4\%\text{ to }4.5\%$** | Rejects narrow stray PCB needle spikes ($<8\%$). Upper bound relaxed to 75% so strong capacitive coupling through 2.2 nF never false-fails. |
    | **Rule 4** | **100 Hz Lock-In Fundamental** | $\Delta 100\text{Hz} \ge 20\text{ mV} \lor (\text{BLC}\ge 130 \land \text{ALC}\ge 15)$ | **$\Delta 100\text{Hz} \approx 70\text{--}95\text{ mV}$** | **$\Delta 100\text{Hz} \le 4\text{ mV}$** | Phase-invariant quadrature lock-in detector rejecting 50 Hz grid fields and rejecting impulse spikes ($>17\times$ dynamic separation). |

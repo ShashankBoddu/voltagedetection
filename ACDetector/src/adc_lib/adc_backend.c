@@ -299,10 +299,11 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   // Calculate ALC/BLC attenuation ratio percentage (integer math)
   int32_t alc_blc_ratio_pct = (avg_p2p_blc > 0) ? ((avg_p2p_alc * 100) / avg_p2p_blc) : 0;
 
-  // RULE 1: Core BLC Peak-to-Peak Amplitude Floor
-  // Intact Wire 2 delivers true capacitive charge: measured P2P ~ 211 to 216 mV
-  // Disconnected Wire 2 only has stray PCB needle spikes: measured P2P ~ 64 to 81 mV
-  bool rule1_blc_amp = (avg_p2p_blc >= 130);
+  // RULE 1: Core BLC Injected Step Delta & Amplitude Floor (Active - Baseline)
+  // Intact Wire 2 delivers true capacitive charge: measured Delta P2P ~ 195 to 212 mV (Active P2P ~ 211 to 216 mV)
+  // Disconnected Wire 2 only has stray PCB needle spikes: measured Delta P2P ~ 50 to 77 mV (Active P2P ~ 64 to 81 mV)
+  // Net differential subtraction (Active - Baseline) cancels ambient common-mode EMI noise.
+  bool rule1_blc_amp = (delta_p2p_blc >= 110 && avg_p2p_blc >= 130);
 
   // RULE 2: Filtered ALC Channel Floor & Injected Delta
   // Hardware RC low-pass filter (220 ohm, 10 uF) integrates intact 100 Hz pulses: measured RMS ~ 34 to 37 mV (P2P ~ 85 to 105 mV)
@@ -349,14 +350,14 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
 
   if (passed) {
     g_kelvin_hardware_failed = false;
-    printk("Kelvin Hardware Self-Test: PASS (All Rules OK: BLC=%d mV [>=140], ALC=%d mV [>=15, d=%d], 100Hz_d=%d mV, Ratio=%d%% [8-45%%])\n",
-           avg_p2p_blc, avg_p2p_alc, delta_alc_p2p, delta_100hz_blc, alc_blc_ratio_pct);
+    printk("Kelvin Hardware Self-Test: PASS (All Rules OK: BLC=%d mV [>=130, d=%d >=110], ALC=%d mV [d=%d], 100Hz_d=%d mV, Ratio=%d%% [8-75%%])\n",
+           avg_p2p_blc, delta_p2p_blc, avg_p2p_alc, delta_alc_p2p, delta_100hz_blc, alc_blc_ratio_pct);
     return true;
   } else {
     g_kelvin_hardware_failed = true;
-    printk("Kelvin Hardware Self-Test: FAIL (R1_BLC:%d, R2_ALC:%d, R3_Ratio:%d, R4_100Hz:%d, R5_DC:%d, AmbSafe:%d) [BLC=%d mV, ALC=%d mV, dALC=%d, 100Hz_d=%d mV, Ratio=%d%%]\n",
+    printk("Kelvin Hardware Self-Test: FAIL (R1_BLC:%d, R2_ALC:%d, R3_Ratio:%d, R4_100Hz:%d, R5_DC:%d, AmbSafe:%d) [BLC=%d mV (d=%d), ALC=%d mV (d=%d), 100Hz_d=%d mV, Ratio=%d%%]\n",
            rule1_blc_amp, rule2_alc_amp, rule3_ratio, rule4_pulse_energy, rule5_dc_bias, rule_ambient_safe,
-           avg_p2p_blc, avg_p2p_alc, delta_alc_p2p, delta_100hz_blc, alc_blc_ratio_pct);
+           avg_p2p_blc, delta_p2p_blc, avg_p2p_alc, delta_alc_p2p, delta_100hz_blc, alc_blc_ratio_pct);
     return false;
   }
 }
