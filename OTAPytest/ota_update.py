@@ -70,7 +70,8 @@ async def run_ota(address, file_path):
             
             async with SMPClient(transport, address) as client:
                 print(f"Connected successfully via SMP (Attempt {attempt + 1}).")
-                print(f"Connection MTU: {client._transport._mtu} bytes")
+                mtu = getattr(client._transport, 'mtu', getattr(client._transport, '_mtu', 244))
+                print(f"Connection MTU: {mtu} bytes")
                 
                 print("Checking image states...")
                 states = await client.request(ImageStatesRead())
