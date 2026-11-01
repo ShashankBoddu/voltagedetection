@@ -1,156 +1,130 @@
 import asyncio
-import argparse
 import os
-import sys
-import time
-from typing import Final
-
+import argparse
 from bleak import BleakScanner, BleakClient
 from smpclient import SMPClient
-from smpclient.generics import success, error
-from smpclient.transport.ble import SMPBLETransport
+from smpclient.generics import success
 from smpclient.requests.image_management import ImageStatesRead, ImageStatesWrite, ImageErase
 from smpclient.requests.os_management import ResetWrite
+
+# Maximum number of retries for the entire process
+MAX_RETRIES = 5
 
 # Default device name from prj.conf
 DEFAULT_DEVICE_NAME = "AC_DETECTOR"
 # Default firmware path
 DEFAULT_FILE_PATH = r"E:\projects\DevelopmentLevelCode\voltagedetection\NRF52\ACDetector\build\ACDetector\zephyr\zephyr.signed.bin"
 
+def extract_mcuboot_hash(image_data: bytes) -> bytes:
+    """Extract the true 32-byte SHA-256 hash from the MCUboot TLV trailer."""
+    import struct
+    if len(image_data) > 32:
+        magic, load_addr, hdr_size, prot_tlv_sz, img_size = struct.unpack('<IIHHI', image_data[:16])
+        if magic == 0x96f3b83d: # IMAGE_MAGIC
+            tlv_off = hdr_size + img_size
+            tlv_data = image_data[tlv_off:]
+            if len(tlv_data) >= 4:
+                off = 4
+                while off + 4 <= len(tlv_data):
+                    t_type, t_len = struct.unpack('<HH', tlv_data[off:off+4])
+                    if t_type == 0x10 and t_len == 32: # IMAGE_TLV_SHA256
+                        return tlv_data[off+4:off+4+32]
+                    off += 4 + t_len
+    import hashlib
+    return hashlib.sha256(image_data).digest()
+
 async def find_device(name):
     print(f"Scanning for BLE device with name '{name}'...")
     try:
-        # Use a generic Bleak scanner for higher reliability
         devices = await BleakScanner.discover(timeout=5.0)
-        
         print(f"Found {len(devices)} device(s) in range:")
         target_device = None
         for d in devices:
             d_name = d.name if d.name else "Unknown"
             print(f"  - {d_name} [{d.address}]")
-            if d.name == name or d.address == name:
+            if d.name and d.name.strip() == name:
                 target_device = d
         
         if target_device:
             print(f"\nTarget device found: {target_device.name} [{target_device.address}]")
             return target_device.address
-            
     except Exception as e:
-        print(f" Scan failed: {e}")
+        print(f"Scan error: {e}")
     return None
 
 async def run_ota(address, file_path):
     if not os.path.exists(file_path):
-        print(f"Error: File {file_path} not found.")
+        print(f"Error: Firmware file not found at: {file_path}")
         return
 
-    # Read the binary file
+    file_size = os.path.getsize(file_path)
+    print(f"Connecting to {address}...")
+    
     with open(file_path, "rb") as f:
         image_data = f.read()
 
-    print(f"Connecting to {address}...")
-    
-    MAX_RETRIES = 3
     for attempt in range(MAX_RETRIES):
-        transport = SMPBLETransport()
         try:
+            from smpclient.transport.ble import SMPBLETransport
+            transport = SMPBLETransport()
+            
             async with SMPClient(transport, address) as client:
                 print(f"Connected successfully via SMP (Attempt {attempt + 1}).")
-                print(f"Connection MTU: {transport.mtu} bytes")
+                print(f"Connection MTU: {client._transport._mtu} bytes")
                 
-                # --- Step 1: Confirmation & Slot Cleanup ---
                 print("Checking image states...")
-                state_resp = await client.request(ImageStatesRead())
-                if success(state_resp):
-                    active_image_hash = None
-                    needs_confirmation = False
-                    has_secondary = False
-                    
-                    for img in getattr(state_resp, 'images', []):
-                        if img.active:
-                            active_image_hash = img.hash
-                            if not img.confirmed:
-                                needs_confirmation = True
-                        else:
-                            has_secondary = True
-                    
-                    if needs_confirmation and active_image_hash:
-                        print(f"Current image is in 'test' mode. Confirming it...")
-                        conf_resp = await client.request(ImageStatesWrite(hash=active_image_hash, confirm=True))
-                        if success(conf_resp):
-                            print("Current image confirmed.")
-                        else:
-                            print(f"Warning: Failed to confirm current image: {conf_resp}")
+                states = await client.request(ImageStatesRead())
+                
+                print("Erasing secondary slot to ensure clean flash...")
+                try:
+                    erase_resp = await client.request(ImageErase(slot=1))
+                    if success(erase_resp):
+                        print("Secondary slot erased.")
+                    else:
+                        print("Erase returned non-success, continuing anyway...")
+                except Exception as e:
+                    print(f"Warning: Could not erase secondary slot explicitly: {e}")
 
-                    # Explicitly erase the secondary slot to avoid "NO_FREE_SLOT" mid-upload
-                    print("Erasing secondary slot to ensure clean flash...")
-                    try:
-                        erase_resp = await client.request(ImageErase())
-                        if success(erase_resp):
-                            print("Secondary slot erased.")
-                        else:
-                            print(f"Secondary slot erase: {erase_resp}")
-                    except Exception as erase_err:
-                        print(f"Erase note: {erase_err}")
-                
-                # --- Step 2: Upload ---
-                print(f"Uploading firmware ({len(image_data)} bytes)...")
-                start_s = time.time()
-                
-                # We need the hash for slot confirmation later. 
-                # Calculating hash manually might be needed if protocol read fails.
-                import hashlib
-                image_hash = hashlib.sha256(image_data).digest()
-                print(f"Target Image Hash: {image_hash.hex()[:10]}...")
+                print(f"Uploading firmware ({file_size} bytes)...")
+                image_hash = extract_mcuboot_hash(image_data)
+                print(f"Target MCUboot Image Hash: {image_hash.hex()[:16]}...")
 
                 try:
                     async for offset in client.upload(image_data):
-                        elapsed = time.time() - start_s
-                        speed = (offset / elapsed / 1024) if elapsed > 0 else 0
-                        progress = (offset / len(image_data)) * 100
-                        print(f"\rProgress: {offset}/{len(image_data)} bytes ({progress:.1f}%) | {speed:.2f} KB/s", end="", flush=True)
-                    
-                    print(f"\nUpload complete.")
+                        percent = (offset / file_size) * 100
+                        print(f"\rProgress: {offset}/{file_size} bytes ({percent:.1f}%)", end="", flush=True)
                 except Exception as upload_err:
-                    print(f"\nUpload failed: {upload_err}")
+                    print(f"\nUpload loop interrupted: {upload_err}")
                     raise upload_err
-
-                # --- Step 3: Verify and Reset ---
-                print("Requesting final image list...")
-                try:
-                    response = await client.request(ImageStatesRead())
                     
-                    if success(response):
-                        new_image_hash = None
-                        for img in getattr(response, 'images', []):
-                            if not img.active:
-                                new_image_hash = img.hash
-                                break
-                        
-                        if new_image_hash:
-                            image_hash = new_image_hash # Use the one from the device if possible
-                            print(f"Found uploaded image in secondary slot.")
-                        else:
-                            print("Warning: Could not find uploaded image in slot 1. Using calculated hash.")
-                    else:
-                        print(f"Warning: Failed to read image states ({response}). Using calculated hash for swap.")
-                except Exception as read_err:
-                    print(f"Warning: Exception reading image states: {read_err}. Proceeding with blind confirmation.")
+                print("\nUpload complete.")
+                
+                print("Requesting final image list...")
+                states = await client.request(ImageStatesRead())
+                
+                has_slot_1 = False
+                if success(states) and hasattr(states, 'images'):
+                    for img in states.images:
+                        if img.slot == 1:
+                            has_slot_1 = True
+                            break
+                            
+                if not has_slot_1:
+                    print("Warning: Slot 1 not reported in image list. Attempting swap by uploaded hash anyway...")
 
-                # Mark the image as 'pending' (this triggers the swap on next boot)
                 print(f"Setting image {image_hash.hex()[:8]} to 'pending'...")
-                write_resp = await client.request(ImageStatesWrite(hash=image_hash))
-                if success(write_resp):
-                    print("Image marked as pending. Swap will occur on reboot.")
+                swap_resp = await client.request(ImageStatesWrite(hash=image_hash))
+                
+                if not success(swap_resp):
+                    print(f"Warning: Failed to mark image pending using hash. Response: {swap_resp}")
                 else:
-                    print(f"FAILED to mark image as pending: {write_resp}")
-                    print("The device will likely NOT update. Ensure MCUMGR_TRANSPORT_NETBUF_SIZE is large enough (>= 512).")
+                    print("Image marked as pending. Swap will occur on reboot.")
 
                 print("Resetting device to apply update...")
                 reset_resp = await client.request(ResetWrite())
                 if success(reset_resp):
                     print("Reset command sent. Device should reboot into the new firmware.")
-                    return # Successfully finished
+                    return
                 else:
                     print(f"Reset command failed: {reset_resp}")
                     return
@@ -158,15 +132,11 @@ async def run_ota(address, file_path):
         except Exception as e:
             error_str = str(e)
             print(f"\nAttempt {attempt + 1} Error: {error_str}")
-            
-            # Catch common Windows/BLE disconnect issues
             if any(msg in error_str for msg in ["max_pdu_size", "Unreachable", "Disconnected", "Lock is not acquired", "not found"]):
                 if attempt < MAX_RETRIES - 1:
-                    print(f"Retrying in 3 seconds...")
+                    print("Retrying in 3 seconds...")
                     await asyncio.sleep(3.0)
                     continue
-            
-            # If it's a protocol error, don't necessarily retry unless we think it's transient
             print("Fatal error encountered.")
             import traceback
             traceback.print_exc()
@@ -176,6 +146,7 @@ async def main():
     parser = argparse.ArgumentParser(description="OTA DFU Update Script for nRF52")
     parser.add_argument("--name", default=DEFAULT_DEVICE_NAME, help="Name or Address of the BLE device")
     parser.add_argument("--file", default=DEFAULT_FILE_PATH, help="Path to the firmware file")
+    parser.add_argument("--verify", action="store_true", help="Automatically verify firmware version & run self-test after reboot")
     
     args = parser.parse_args()
 
@@ -187,6 +158,28 @@ async def main():
 
     try:
         await run_ota(address, args.file)
+        if args.verify:
+            print("\nWaiting 4 seconds for device to complete boot & power-on self-test...")
+            await asyncio.sleep(4.0)
+            from test_device import ACDetectorTester, scan_for_device, TX_CHAR_UUID
+            new_addr = await scan_for_device(args.name)
+            if new_addr:
+                print("\n" + "=" * 60)
+                print("       POST-OTA AUTOMATED VERIFICATION")
+                print("=" * 60)
+                tester = ACDetectorTester(new_addr, args.name)
+                smp_info = await tester.query_smp_image_states()
+                print(f"Active Slot:      Slot {smp_info.get('slot', 'Unknown')}")
+                print(f"Confirmation:     {'CONFIRMED' if smp_info.get('confirmed') else 'UNCONFIRMED'}")
+                async with BleakClient(new_addr) as client:
+                    await client.start_notify(TX_CHAR_UUID, tester.notification_handler)
+                    await asyncio.sleep(0.5)
+                    ver = await tester.query_version(client)
+                    if ver:
+                        print(f"Firmware Version: {ver}")
+                    await tester.run_kelvin_selftest(client)
+                    tester.print_selftest_report()
+                    await client.stop_notify(TX_CHAR_UUID)
     except Exception as e:
         print(f"\nCaught unexpected error: {e}")
 
