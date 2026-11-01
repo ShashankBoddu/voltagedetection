@@ -274,7 +274,7 @@ void ble_tx_thread_fn(void *arg1, void *arg2, void *arg3) {
 
     if (send_version_data) {
       send_version_data = false;
-      static const char ver_resp[] = "VER:V0.8";
+      static const char ver_resp[] = "VER:V0.1";
       ble_send(ver_resp, sizeof(ver_resp) - 1);
       printk("Sent Version Response: %s\n", ver_resp);
     }
