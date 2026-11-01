@@ -10,7 +10,7 @@ from smpclient.requests.os_management import ResetWrite
 # Maximum number of retries for the entire process
 MAX_RETRIES = 5
 
-# Default device name from prj.conf
+# Default device name from prj.confclea
 DEFAULT_DEVICE_NAME = "AC_DETECTOR"
 # Default firmware path
 DEFAULT_FILE_PATH = r"E:\projects\DevelopmentLevelCode\voltagedetection\NRF52\ACDetector\build\ACDetector\zephyr\zephyr.signed.bin"
@@ -171,6 +171,7 @@ async def main():
                 tester = ACDetectorTester(new_addr, args.name)
                 smp_info = await tester.query_smp_image_states()
                 print(f"Active Slot:      Slot {smp_info.get('slot', 'Unknown')}")
+                print(f"Active Hash:      {smp_info.get('hash', 'Unknown')}")
                 print(f"Confirmation:     {'CONFIRMED' if smp_info.get('confirmed') else 'UNCONFIRMED'}")
                 async with BleakClient(new_addr) as client:
                     await client.start_notify(TX_CHAR_UUID, tester.notification_handler)

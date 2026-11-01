@@ -148,8 +148,8 @@ class ACDetectorTester:
                 resp = await client.request(ImageStatesRead())
                 if success(resp):
                     for img in getattr(resp, 'images', []):
-                        if getattr(img, 'active', False):
-                            info["slot"] = getattr(img, 'slot', 0)
+                        if getattr(img, 'slot', -1) == 0:
+                            info["slot"] = 0
                             hash_bytes = getattr(img, 'hash', b'')
                             info["hash"] = hash_bytes.hex()[:16] + "..." if hash_bytes else "Unknown"
                             info["confirmed"] = getattr(img, 'confirmed', False)
