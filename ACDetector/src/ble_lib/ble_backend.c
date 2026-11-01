@@ -274,7 +274,7 @@ void ble_tx_thread_fn(void *arg1, void *arg2, void *arg3) {
 
     if (send_version_data) {
       send_version_data = false;
-      static const char ver_resp[] = "VER:V0.7";
+      static const char ver_resp[] = "VER:V0.8";
       ble_send(ver_resp, sizeof(ver_resp) - 1);
       printk("Sent Version Response: %s\n", ver_resp);
     }
@@ -289,17 +289,19 @@ void ble_tx_thread_fn(void *arg1, void *arg2, void *arg3) {
       data_t dummy_snap;
       adc_get_snapshot(&dummy_snap, safe_blc_buf, safe_alc_buf);
 
-      // 1. Reply with 16-byte Differential Self-Test Diagnostics Packet
-      uint8_t ack[16];
+      // 1. Reply with 20-byte Differential Self-Test Diagnostics Packet
+      uint8_t ack[20];
       ack[0] = 'K';
       ack[1] = res.passed ? 1 : 0;
-      int16_t blc_active_rms = (int16_t)res.reported_rms_mv;
-      int16_t blc_base_rms   = (int16_t)res.baseline_rms_mv;
-      int16_t blc_delta_rms  = (int16_t)res.delta_rms_mv;
-      int16_t blc_delta_p2p  = (int16_t)res.delta_p2p_mv;
-      int16_t alc_active_rms = (int16_t)res.alc_rms_mv;
-      int16_t blc_p2p        = (int16_t)res.p2p_mv;
-      int16_t alc_p2p        = (int16_t)res.alc_p2p_mv;
+      int16_t blc_active_rms  = (int16_t)res.reported_rms_mv;
+      int16_t blc_base_rms    = (int16_t)res.baseline_rms_mv;
+      int16_t blc_delta_rms   = (int16_t)res.delta_rms_mv;
+      int16_t blc_delta_p2p   = (int16_t)res.delta_p2p_mv;
+      int16_t alc_active_rms  = (int16_t)res.alc_rms_mv;
+      int16_t blc_p2p         = (int16_t)res.p2p_mv;
+      int16_t alc_p2p         = (int16_t)res.alc_p2p_mv;
+      int16_t blc_delta_100hz = (int16_t)res.delta_100hz_mv;
+      int16_t blc_dc_mean     = (int16_t)res.mean_mv;
 
       ack[2] = (uint8_t)(blc_active_rms & 0xFF);
       ack[3] = (uint8_t)((blc_active_rms >> 8) & 0xFF);
@@ -316,6 +318,11 @@ void ble_tx_thread_fn(void *arg1, void *arg2, void *arg3) {
       ack[13] = (uint8_t)((blc_p2p >> 8) & 0xFF);
       ack[14] = (uint8_t)(alc_p2p & 0xFF);
       ack[15] = (uint8_t)((alc_p2p >> 8) & 0xFF);
+
+      ack[16] = (uint8_t)(blc_delta_100hz & 0xFF);
+      ack[17] = (uint8_t)((blc_delta_100hz >> 8) & 0xFF);
+      ack[18] = (uint8_t)(blc_dc_mean & 0xFF);
+      ack[19] = (uint8_t)((blc_dc_mean >> 8) & 0xFF);
       ble_send((const char *)ack, sizeof(ack));
       k_sleep(K_MSEC(25));
 

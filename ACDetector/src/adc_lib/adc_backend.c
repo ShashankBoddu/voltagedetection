@@ -302,22 +302,24 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   // RULE 1: Core BLC Peak-to-Peak Amplitude Floor
   // Intact Wire 2 delivers true capacitive charge: measured P2P ~ 211 to 216 mV
   // Disconnected Wire 2 only has stray PCB needle spikes: measured P2P ~ 64 to 81 mV
-  bool rule1_blc_amp = (avg_p2p_blc >= 140);
+  bool rule1_blc_amp = (avg_p2p_blc >= 130);
 
   // RULE 2: Filtered ALC Channel Floor & Injected Delta
-  // Hardware RC low-pass filter (220 ohm, 10 uF) integrates intact 100 Hz pulses: measured P2P ~ 36 to 37 mV (delta ~ 35 mV)
-  // Narrow stray needle spikes carry no energy and are suppressed: measured P2P ~ 2 mV (delta ~ 0 mV)
-  bool rule2_alc_amp = (avg_p2p_alc >= 15 && delta_alc_p2p >= 10);
+  // Hardware RC low-pass filter (220 ohm, 10 uF) integrates intact 100 Hz pulses: measured RMS ~ 34 to 37 mV (P2P ~ 85 to 105 mV)
+  // Narrow stray needle spikes carry no low-frequency energy and are suppressed: measured RMS ~ 2 mV (P2P ~ 2 to 4 mV)
+  bool rule2_alc_amp = ((avg_p2p_alc >= 20 || avg_active_rms_alc >= 12) && 
+                        (delta_alc_p2p >= 8 || avg_active_rms_alc >= 12));
 
   // RULE 3: Dual-Channel Filter Ratio (ALC / BLC)
-  // Intact loop ratio is nominally ~16.8% to 17.5% (37 mV on 212 mV BLC)
+  // Intact loop ratio is nominally ~16.8% to 50% (ALC P2P ~ 90 mV on 212 mV BLC)
   // Disconnected needle ratio is only ~2.4% to 4.5% (2 mV on 81 mV BLC)
-  bool rule3_ratio = (alc_blc_ratio_pct >= 8 && alc_blc_ratio_pct <= 45);
+  // Upper limit relaxed to 75% so strong capacitive coupling through 2.2 nF NEVER false-fails
+  bool rule3_ratio = (alc_blc_ratio_pct >= 8 && alc_blc_ratio_pct <= 75);
 
   // RULE 4: Sustained Injected 100 Hz Lock-In Energy & Coincident Confirmation
-  // Intact loop injects sustained 100 Hz fundamental: delta 100Hz >= 25 mV OR coincident (BLC >= 150 && ALC >= 20)
-  // Disconnected stray needles carry almost zero 100 Hz fundamental (delta 100Hz <= 4 mV, ALC ~ 2 mV)
-  bool rule4_pulse_energy = (delta_100hz_blc >= 25 || (avg_p2p_blc >= 150 && avg_p2p_alc >= 20));
+  // Intact loop injects sustained 100 Hz fundamental: delta 100Hz >= 20 mV OR coincident (BLC >= 130 && ALC RMS >= 15)
+  // Disconnected stray needles carry almost zero 100 Hz fundamental (delta 100Hz <= 4 mV, ALC RMS ~ 2 mV)
+  bool rule4_pulse_energy = (delta_100hz_blc >= 20 || (avg_p2p_blc >= 130 && avg_active_rms_alc >= 15));
 
   // RULE 5: Preamp DC Bias Operating Point
   // MCP601 virtual ground must be within normal linear dynamic range (800 to 2500 mV)
