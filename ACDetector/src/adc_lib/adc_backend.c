@@ -94,6 +94,10 @@ static void calc_goertzel_50hz_150hz_rms_mV(int16_t *buf, int count,
                                             int32_t *out_rms_50,
                                             int32_t *out_rms_150);
 
+static void calc_goertzel_50hz_100hz_rms_mV(int16_t *buf, int count,
+                                            int32_t *out_rms_50,
+                                            int32_t *out_rms_100);
+
 static void calc_mean_rms_p2p_mV(int16_t *buf, int count, int32_t *mean_mV,
                                  int32_t *rms_mV, int32_t *p2p_mV);
 
@@ -125,37 +129,41 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   /* =========================================================================
    * PHASE 1: Baseline Ambient Capture (GPIO P0.07 High-Z Input / Tri-State)
    * Measures quiescent ambient noise and any stray grid coupling BEFORE drive.
+   * Uses dual Goertzel: 50 Hz (grid ambient) and 100 Hz (quiescent floor).
    * ========================================================================= */
   k_timer_stop(&selftest_timer);
   gpio_pin_configure_dt(&selftest_drive_spec, GPIO_INPUT);
   k_sleep(K_MSEC(30)); // Settle in high-Z
 
-  int32_t base_50hz_blc = 0, base_150hz_blc = 0, base_mean_blc = 0, base_rms_blc = 0, base_p2p_blc = 0;
+  int32_t base_50hz_blc = 0, base_100hz_blc = 0, base_mean_blc = 0, base_rms_blc = 0, base_p2p_blc = 0;
   
   // Average 2 cycles of baseline
   int base_samples = 0;
-  int32_t sum_base_rms_blc = 0, sum_base_p2p_blc = 0, sum_base_50hz_blc = 0;
+  int32_t sum_base_rms_blc = 0, sum_base_p2p_blc = 0, sum_base_50hz_blc = 0, sum_base_100hz_blc = 0;
   for (int b = 0; b < 2; b++) {
     if (!adc_read(adc_dev, &seq_blc) && !adc_read(adc_dev, &seq_alc)) {
-      calc_goertzel_50hz_150hz_rms_mV(adc_blc_buf, SAMPLE_COUNT, &base_50hz_blc, &base_150hz_blc);
+      calc_goertzel_50hz_100hz_rms_mV(adc_blc_buf, SAMPLE_COUNT, &base_50hz_blc, &base_100hz_blc);
       calc_mean_rms_p2p_mV(adc_blc_buf, SAMPLE_COUNT, &base_mean_blc, &base_rms_blc, &base_p2p_blc);
       sum_base_rms_blc += base_rms_blc;
       sum_base_p2p_blc += base_p2p_blc;
       sum_base_50hz_blc += base_50hz_blc;
+      sum_base_100hz_blc += base_100hz_blc;
       base_samples++;
     }
   }
   int32_t avg_base_rms_blc = base_samples ? (sum_base_rms_blc / base_samples) : 0;
   int32_t avg_base_p2p_blc = base_samples ? (sum_base_p2p_blc / base_samples) : 0;
   int32_t avg_base_50hz_blc = base_samples ? (sum_base_50hz_blc / base_samples) : 0;
+  int32_t avg_base_100hz_blc = base_samples ? (sum_base_100hz_blc / base_samples) : 0;
 
-  printk("Kelvin Baseline Ambient: RMS %d mV, P2P %d mV, 50Hz %d mV\n", 
-         avg_base_rms_blc, avg_base_p2p_blc, avg_base_50hz_blc);
+  printk("Kelvin Baseline Ambient: RMS %d mV, P2P %d mV, 50Hz %d mV, 100Hz %d mV\n", 
+         avg_base_rms_blc, avg_base_p2p_blc, avg_base_50hz_blc, avg_base_100hz_blc);
 
   /* =========================================================================
-   * PHASE 2: Option B - Transient Step-Response Pulse Drive (100 Hz / 5 ms Toggles)
+   * PHASE 2: Transient Step-Response Pulse Drive (100 Hz / 5 ms Toggles)
    * Drives fast rising/falling step edges through C_iso (10 pF) & R_iso (10 MΩ)
    * into Wire 2 to inject transient charge spikes into the copper sensing plate.
+   * Lock-in Goertzel detects the fundamental 100 Hz signal (k = 2.0).
    * ========================================================================= */
   gpio_pin_configure_dt(&selftest_drive_spec, GPIO_OUTPUT_INACTIVE);
   g_selftest_drive_state = false;
@@ -163,8 +171,8 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   k_sleep(K_MSEC(20)); // Allow step transitions to establish rhythm
 
   #define SELFTEST_CYCLE_COUNT 4
-  int32_t sum_50hz_blc = 0, sum_total_blc = 0, sum_p2p_blc = 0, sum_mean_blc = 0;
-  int32_t sum_50hz_alc = 0, sum_total_alc = 0, sum_p2p_alc = 0, sum_mean_alc = 0;
+  int32_t sum_100hz_blc = 0, sum_50hz_blc = 0, sum_total_blc = 0, sum_p2p_blc = 0, sum_mean_blc = 0;
+  int32_t sum_100hz_alc = 0, sum_50hz_alc = 0, sum_total_alc = 0, sum_p2p_alc = 0, sum_mean_alc = 0;
   int32_t sum_active_samples = 0;
   int valid_cycles = 0;
 
@@ -172,20 +180,22 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
     int err_blc = adc_read(adc_dev, &seq_blc);
     int err_alc = adc_read(adc_dev, &seq_alc);
     if (!err_blc && !err_alc) {
-      int32_t c_50hz_blc = 0, c_150hz_blc = 0, c_mean_blc = 0, c_rms_blc = 0, c_p2p_blc = 0;
-      int32_t c_50hz_alc = 0, c_150hz_alc = 0, c_mean_alc = 0, c_rms_alc = 0, c_p2p_alc = 0;
+      int32_t c_50hz_blc = 0, c_100hz_blc = 0, c_mean_blc = 0, c_rms_blc = 0, c_p2p_blc = 0;
+      int32_t c_50hz_alc = 0, c_100hz_alc = 0, c_mean_alc = 0, c_rms_alc = 0, c_p2p_alc = 0;
 
-      calc_goertzel_50hz_150hz_rms_mV(adc_blc_buf, SAMPLE_COUNT, &c_50hz_blc, &c_150hz_blc);
+      calc_goertzel_50hz_100hz_rms_mV(adc_blc_buf, SAMPLE_COUNT, &c_50hz_blc, &c_100hz_blc);
       calc_mean_rms_p2p_mV(adc_blc_buf, SAMPLE_COUNT, &c_mean_blc, &c_rms_blc, &c_p2p_blc);
 
-      calc_goertzel_50hz_150hz_rms_mV(adc_alc_buf, SAMPLE_COUNT, &c_50hz_alc, &c_150hz_alc);
+      calc_goertzel_50hz_100hz_rms_mV(adc_alc_buf, SAMPLE_COUNT, &c_50hz_alc, &c_100hz_alc);
       calc_mean_rms_p2p_mV(adc_alc_buf, SAMPLE_COUNT, &c_mean_alc, &c_rms_alc, &c_p2p_alc);
 
+      sum_100hz_blc += c_100hz_blc;
       sum_50hz_blc += c_50hz_blc;
       sum_total_blc += c_rms_blc;
       sum_p2p_blc += c_p2p_blc;
       sum_mean_blc += c_mean_blc;
 
+      sum_100hz_alc += c_100hz_alc;
       sum_50hz_alc += c_50hz_alc;
       sum_total_alc += c_rms_alc;
       sum_p2p_alc += c_p2p_alc;
@@ -237,13 +247,17 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
     return false;
   }
 
+  int32_t avg_active_100hz_blc = sum_100hz_blc / valid_cycles;
   int32_t avg_active_50hz_blc = sum_50hz_blc / valid_cycles;
+  ARG_UNUSED(avg_active_50hz_blc);
   int32_t avg_active_rms_blc = sum_total_blc / valid_cycles;
   int32_t avg_p2p_blc = sum_p2p_blc / valid_cycles;
   int32_t avg_mean_blc = sum_mean_blc / valid_cycles;
 
+  int32_t avg_active_100hz_alc = sum_100hz_alc / valid_cycles;
   int32_t avg_active_50hz_alc = sum_50hz_alc / valid_cycles;
   ARG_UNUSED(avg_active_50hz_alc);
+  ARG_UNUSED(avg_active_100hz_alc);
   int32_t avg_active_rms_alc = sum_total_alc / valid_cycles;
   int32_t avg_p2p_alc = sum_p2p_alc / valid_cycles;
   int32_t avg_mean_alc = sum_mean_alc / valid_cycles;
@@ -259,7 +273,7 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   k_mutex_unlock(&data_mutex);
 
   /* =========================================================================
-   * PHASE 3: 5-Point Industrial Standard Evaluation Suite (Zero Floating-Point)
+   * PHASE 3: 5-Point Industrial Standard Evaluation Suite (100 Hz Lock-In)
    * Prevents false passes (e.g. from stray PCB capacitive spikes or live 50 Hz fields)
    * and prevents false fails on intact hardware.
    * ========================================================================= */
@@ -269,8 +283,8 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   int32_t delta_rms_blc = avg_active_rms_blc - avg_base_rms_blc;
   if (delta_rms_blc < 0) delta_rms_blc = 0;
 
-  int32_t delta_50hz_blc = avg_active_50hz_blc - avg_base_50hz_blc;
-  if (delta_50hz_blc < 0) delta_50hz_blc = 0;
+  int32_t delta_100hz_blc = avg_active_100hz_blc - avg_base_100hz_blc;
+  if (delta_100hz_blc < 0) delta_100hz_blc = 0;
 
   // Calculate ALC/BLC attenuation ratio percentage (integer math)
   int32_t alc_blc_ratio_pct = (avg_p2p_blc > 0) ? ((avg_p2p_alc * 100) / avg_p2p_blc) : 0;
@@ -290,10 +304,10 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
   // Disconnected needle ratio is only ~2.7% to 4.5%
   bool rule3_ratio = (alc_blc_ratio_pct >= 10 && alc_blc_ratio_pct <= 50);
 
-  // RULE 4: Sustained Injected Signal Energy / Pulse Width
-  // Intact loop injects sustained energy: delta RMS ~ 65 mV, active samples ~ 8 to 12
-  // Disconnected stray needles carry almost zero energy (delta RMS <= 4 mV, active samples 1 to 2)
-  bool rule4_pulse_energy = (delta_rms_blc >= 15 || avg_active_samples >= 5);
+  // RULE 4: Sustained Injected 100 Hz Lock-In Energy & Pulse Duration
+  // Intact loop injects sustained 100 Hz fundamental: delta_100hz_blc >= 15 mV OR delta RMS >= 15 mV OR samples >= 5
+  // Disconnected stray needles carry almost zero 100 Hz fundamental energy (delta 100Hz <= 4 mV, delta RMS <= 4 mV, samples 1-2)
+  bool rule4_pulse_energy = (delta_100hz_blc >= 15 || delta_rms_blc >= 15 || avg_active_samples >= 5);
 
   // RULE 5: Preamp DC Bias Operating Point
   // MCP601 virtual ground must be within normal linear dynamic range (1100 to 2200 mV)
@@ -312,10 +326,10 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
     out_result->baseline_rms_mv = avg_base_rms_blc;
     out_result->delta_rms_mv = delta_rms_blc;
     out_result->delta_p2p_mv = (delta_p2p_blc > 0) ? delta_p2p_blc : avg_p2p_blc;
-    out_result->delta_50hz_mv = delta_50hz_blc;
+    out_result->delta_100hz_mv = delta_100hz_blc;
     out_result->mean_mv = avg_mean_blc;
     out_result->p2p_mv = avg_p2p_blc;
-    out_result->freq_50hz_rms_mv = avg_active_50hz_blc;
+    out_result->freq_100hz_rms_mv = avg_active_100hz_blc;
     out_result->alc_rms_mv = avg_active_rms_alc;
     out_result->alc_mean_mv = avg_mean_alc;
     out_result->alc_p2p_mv = avg_p2p_alc;
@@ -323,14 +337,14 @@ bool hardware_kelvin_selftest(selftest_result_t *out_result) {
 
   if (passed) {
     g_kelvin_hardware_failed = false;
-    printk("Kelvin Hardware Self-Test: PASS (All 5 Industrial Rules OK: BLC=%d mV [>=150], ALC=%d mV [>=15], Ratio=%d%% [10-50%%], dRMS=%d mV, Pts=%d)\n",
-           avg_p2p_blc, avg_p2p_alc, alc_blc_ratio_pct, delta_rms_blc, avg_active_samples);
+    printk("Kelvin Hardware Self-Test: PASS (All 5 Industrial Rules OK: BLC=%d mV [>=150], ALC=%d mV [>=15], 100Hz_d=%d mV, Ratio=%d%% [10-50%%], dRMS=%d mV, Pts=%d)\n",
+           avg_p2p_blc, avg_p2p_alc, delta_100hz_blc, alc_blc_ratio_pct, delta_rms_blc, avg_active_samples);
     return true;
   } else {
     g_kelvin_hardware_failed = true;
-    printk("Kelvin Hardware Self-Test: FAIL (R1_BLC:%d, R2_ALC:%d, R3_Ratio:%d, R4_Energy:%d, R5_DC:%d, AmbSafe:%d) [BLC=%d mV, ALC=%d mV, Ratio=%d%%, dRMS=%d mV, Pts=%d]\n",
+    printk("Kelvin Hardware Self-Test: FAIL (R1_BLC:%d, R2_ALC:%d, R3_Ratio:%d, R4_Energy:%d, R5_DC:%d, AmbSafe:%d) [BLC=%d mV, ALC=%d mV, 100Hz_d=%d mV, Ratio=%d%%, dRMS=%d mV, Pts=%d]\n",
            rule1_blc_amp, rule2_alc_amp, rule3_ratio, rule4_pulse_energy, rule5_dc_bias, rule_ambient_safe,
-           avg_p2p_blc, avg_p2p_alc, alc_blc_ratio_pct, delta_rms_blc, avg_active_samples);
+           avg_p2p_blc, avg_p2p_alc, delta_100hz_blc, alc_blc_ratio_pct, delta_rms_blc, avg_active_samples);
     return false;
   }
 }
@@ -492,6 +506,60 @@ static void calc_goertzel_50hz_150hz_rms_mV(int16_t *buf, int count,
   }
   if (out_rms_150) {
     *out_rms_150 = (int32_t)((rms150 * ADC_LSB_uV) / 1000.0f);
+  }
+}
+
+/* ---------- Dual-Frequency Goertzel Filter (50Hz Grid + 100Hz Self-Test Lock-In) ---------- */
+static void calc_goertzel_50hz_100hz_rms_mV(int16_t *buf, int count,
+                                             int32_t *out_rms_50,
+                                             int32_t *out_rms_100) {
+  // First pass: Calculate mean (DC offset removal)
+  int64_t sum = 0;
+  for (int i = 0; i < count; i++) {
+    sum += buf[i];
+  }
+  float mean = (float)sum / (float)count;
+
+  // 50Hz fundamental power signal (Fs = 10000 Hz, N = 200, k = 1.0)
+  float omega50 = (2.0f * 3.14159265f * 1.0f) / (float)count;
+  float coeff50 = 2.0f * cosf(omega50);
+  float q0_50 = 0.0f, q1_50 = 0.0f, q2_50 = 0.0f;
+
+  // 100Hz self-test lock-in fundamental (Fs = 10000 Hz, N = 200, k = 2.0)
+  float omega100 = (2.0f * 3.14159265f * 2.0f) / (float)count;
+  float coeff100 = 2.0f * cosf(omega100);
+  float q0_100 = 0.0f, q1_100 = 0.0f, q2_100 = 0.0f;
+
+  for (int i = 0; i < count; i++) {
+    float s = (float)buf[i] - mean; // DC removed
+    // 50Hz Goertzel
+    q0_50 = coeff50 * q1_50 - q2_50 + s;
+    q2_50 = q1_50;
+    q1_50 = q0_50;
+
+    // 100Hz Goertzel
+    q0_100 = coeff100 * q1_100 - q2_100 + s;
+    q2_100 = q1_100;
+    q1_100 = q0_100;
+  }
+
+  // 50Hz RMS
+  float real50 = q1_50 - q2_50 * cosf(omega50);
+  float imag50 = q2_50 * sinf(omega50);
+  float mag50 = sqrtf(real50 * real50 + imag50 * imag50) / ((float)count / 2.0f);
+  float rms50 = mag50 / 1.41421356f;
+
+  // 100Hz RMS
+  float real100 = q1_100 - q2_100 * cosf(omega100);
+  float imag100 = q2_100 * sinf(omega100);
+  float mag100 = sqrtf(real100 * real100 + imag100 * imag100) / ((float)count / 2.0f);
+  float rms100 = mag100 / 1.41421356f;
+
+  if (out_rms_50) {
+    *out_rms_50 = (int32_t)((rms50 * ADC_LSB_uV) / 1000.0f);
+  }
+  if (out_rms_100) {
+    *out_rms_100 = (int32_t)((rms100 * ADC_LSB_uV) / 1000.0f);
   }
 }
 

@@ -42,15 +42,15 @@ python test_device.py
 
 ```
 Memory region         Used Size  Region Size  %age Used
-           FLASH:      214188 B     224768 B     95.29%
+           FLASH:      214632 B     224768 B     95.49%
              RAM:       59202 B        64 KB     90.34%
         IDT_LIST:          0 GB        32 KB      0.00%
 ```
 
-* **Flash Utilization**: 214,188 B / 224,768 B (95.29%). 10,580 bytes free in Slot 0 partition.
+* **Flash Utilization**: 214,632 B / 224,768 B (95.49%). 10,136 bytes free in Slot 0 partition.
 * **RAM Footprint**: 59,202 B / 65,536 B (90.34%). 6,334 bytes free RAM. Stack protection guarded via ARM Cortex-M4 MPU.
-* **MCUboot Signed Image**: `zephyr.signed.bin` (215,036 bytes), SHA-256: `e75e731b884051065f47284764db64e9792688ef7ea63c6a716c78e90635b0ca`.
-* **Version String Broadcast**: `"VER:V0.4"`
+* **MCUboot Signed Image**: `zephyr.signed.bin` (215,480 bytes), SHA-256: `6f2f1a76a4107e5d2032db0745e88e20bdf82cc46ae4ce6318426552697c32c3`.
+* **Version String Broadcast**: `"VER:V0.5"`
 * **Stack Allocations**:
   - `CONFIG_MAIN_STACK_SIZE=2048`
   - `CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE=2048`
@@ -105,25 +105,31 @@ SAADC AIN7 ───────┼──[RC Filter / Pre-amp]──────
 2. **Phase 1: Baseline Ambient Capture (Drive Disabled)**:
    - Pin P0.07 configured as `GPIO_INPUT` (floating High-Z / tri-state).
    - Samples 2 cycles (400 samples at 10 kHz, 40 ms total).
-   - Computes quiescent ambient baseline: `avg_base_p2p_blc` ($2\text{ to }4\text{ mV}$) and `avg_base_rms_blc`.
+   - Computes quiescent ambient baseline using dual Goertzel:
+     - 50 Hz Grid Ambient (`avg_base_50hz_blc`): $2\text{ to }4\text{ mV}$.
+     - 100 Hz Lock-In Quiescent Floor (`avg_base_100hz_blc`): $1\text{ to }2\text{ mV}$.
+     - Time-domain ambient: `avg_base_p2p_blc` ($2\text{ to }4\text{ mV}$) and `avg_base_rms_blc`.
    - *Ambient Safety Inhibit*: Rejects test if ambient 50 Hz electric field is excessive ($> 60\text{ mV}$ P2P or $> 25\text{ mV}$ RMS) to prevent unsafe false passes near live equipment.
 
-3. **Phase 2: Active 100 Hz Step Injection Pulse Drive**:
+3. **Phase 2: Active 100 Hz Step Injection & Digital Lock-In Detection**:
    - Pin P0.07 configured as Output, toggled at 100 Hz (every 5 ms) via `selftest_timer`.
    - Fast step transitions ($t_r < 10\text{ ns}$) inject high-frequency displacement current:
      $$I_{\text{inj}} = C_{\text{iso}} \frac{dV}{dt}$$
    - Samples 4 cycles (800 samples, `SELFTEST_CYCLE_COUNT 4`) on BLC (`AIN7`) and ALC (`AIN4`).
+   - Digital lock-in Goertzel filter ($k = 2.0$ for 200 samples @ 10 kHz) extracts pure 100 Hz fundamental:
+     - Orthogonal to 50 Hz power grid ambient noise ($\int \sin(100\pi t) \sin(200\pi t) dt = 0$).
+     - Rejects DC offset and preamp bias drift completely.
    - Waveforms are immediately copied into published buffers *before* restoring MUX and clearing `g_selftest_active` to prevent any SAADC DMA overwriting.
    - Pin P0.07 is returned to safe `GPIO_INPUT` (High-Z).
 
-4. **Phase 3: 5-Point Industrial Standard Evaluation Suite (Zero Floating-Point)**:
+4. **Phase 3: 5-Point Industrial Standard Evaluation Suite (100 Hz Lock-In)**:
 
    | Rule | Evaluated Metric | Acceptance Range | Connected (Pass) | Disconnected (Fail) | Purpose & Failure Mode Prevented |
    | :--- | :--- | :--- | :---: | :---: | :--- |
    | **Rule 1** | **BLC Peak-to-Peak** | $\ge 150\text{ mV}$ | **$211\text{ to }216\text{ mV}$** | **$16\text{ to }110\text{ mV}$** | Proves physical charge injection through Wire 2 $\rightarrow$ Plate $\rightarrow$ Wire 1. 150 mV floor provides 40 mV margin above max parasitic needle spike (110 mV). |
    | **Rule 2** | **ALC Filtered Output** | $\ge 15\text{ mV}$ | **$36\text{ to }37\text{ mV}$** | **$2\text{ to }3\text{ mV}$** | Proves energy transfer through hardware RC low-pass filter ($220\,\Omega, 10\,\mu\text{F}$). **$12\times$ physical signal separation**. |
    | **Rule 3** | **Dual-Channel Ratio** | $10\% \le \frac{\text{ALC}}{\text{BLC}} \le 50\%$ | **$16.8\%\text{ to }17.5\%$** | **$2.7\%\text{ to }4.5\%$** | Rejects narrow stray PCB needle spikes which lack low-frequency energy ($>4\times$ margin). |
-   | **Rule 4** | **Injected Signal Energy** | $\Delta\text{RMS} \ge 15\text{ mV}$ OR $\ge 5\text{ pts}$ | **$\Delta\text{RMS} \approx 65\text{ mV}$** | **$\Delta\text{RMS} \le 4\text{ mV}$** | Differentiates sustained capacitive step pulses from high-pass needle spikes. |
+   | **Rule 4** | **100 Hz Lock-In Fundamental & Energy** | $\Delta 100\text{Hz} \ge 15\text{ mV}$ OR $\Delta\text{RMS} \ge 15\text{ mV}$ OR $\ge 5\text{ pts}$ | **$\Delta 100\text{Hz} \approx 65\text{--}90\text{ mV}$** | **$\Delta 100\text{Hz} \le 4\text{ mV}$** | Digital lock-in amplifier rejecting 50 Hz grid fields and rejecting impulse spikes ($>16\times$ dynamic separation). |
    | **Rule 5** | **Preamp DC Bias** | $1100\text{ mV} \le V_{\text{DC}} \le 2200\text{ mV}$ | **$\approx 1627\text{ mV}$** | $<800\text{ mV}$ or $>2400\text{ mV}$ | Validates MCP601 virtual ground health against ESD damage or trace fracture. |
    | **Inhibit** | **Ambient Noise Floor** | $\le 60\text{ mV}$ P2P & $\le 25\text{ mV}$ RMS | **$2\text{ to }4\text{ mV}$** | **$2\text{ to }4\text{ mV}$** | Prevents false passes caused by testing near an energized 50 Hz utility grid. |
 
