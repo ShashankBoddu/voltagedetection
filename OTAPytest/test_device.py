@@ -250,14 +250,23 @@ class ACDetectorTester:
 async def scan_for_device(name: str) -> Optional[str]:
     print(f"Scanning for BLE device '{name}' (5-second timeout)...")
     devices = await BleakScanner.discover(timeout=5.0)
+    target = None
     for d in devices:
-        if d.name == name or d.address.upper() == name.upper():
-            print(f"Found target: {d.name} [{d.address}]")
-            return d.address
+        if d.name and (d.name.strip() == name or d.address.upper() == name.upper()):
+            target = d
+            break
+    if target:
+        clean_target_name = target.name.encode('ascii', errors='replace').decode('ascii') if target.name else "Unknown"
+        print(f"Found target: {clean_target_name} [{target.address}]")
+        return target.address
+
     print(f"Device '{name}' not found. Available devices:")
     for d in devices:
-        if d.name:
-            print(f"  - {d.name} [{d.address}]")
+        clean_name = d.name.encode('ascii', errors='replace').decode('ascii') if d.name else "Unknown"
+        try:
+            print(f"  - {clean_name} [{d.address}]")
+        except Exception:
+            pass
     return None
 
 

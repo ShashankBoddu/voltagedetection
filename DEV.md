@@ -1,8 +1,8 @@
 # Developer Reference & System Architecture Guide (`DEV.md`)
 
 > **Project**: High-Voltage Non-Contact Voltage (NCV) Detector & Wireless Telemetry Suite  
-> **Last Updated**: 2026-11-01  
-> **Active Firmware Version**: `>> ACDetector V1.3.0 (IEC 61243-1 Kelvin Verified) <<`  
+> **Last Updated**: 2026-11-02  
+> **Active Firmware Version**: `>> ACDetector V1.4.0 (8-Cycle 100Hz Lock-In & Single 40mV Inhibitor) <<`  
 > **Target Hardware**: Nordic Semiconductor nRF52832 (ARM Cortex-M4F @ 64 MHz, 64 KB RAM, 512 KB Flash)  
 > **Software Stack**: Zephyr OS v4.2.99 / nRF Connect SDK v3.2.1  
 > **Firmware Path**: [`ACDetector`](file:///e:/projects/DevelopmentLevelCode/voltagedetection/NRF52/ACDetector)  
@@ -42,15 +42,15 @@ python test_device.py
 
 ```text
 Memory region         Used Size  Region Size  %age Used
-           FLASH:      214676 B     224768 B     95.51%
+           FLASH:      214928 B     224768 B     95.62%
              RAM:       59202 B        64 KB     90.34%
         IDT_LIST:          0 GB        32 KB      0.00%
 ```
 
-* **Flash Utilization**: 214,676 B / 224,768 B (95.51%). 10,092 bytes free in Slot 0 partition.
+* **Flash Utilization**: 214,928 B / 224,768 B (95.62%). 9,840 bytes free in Slot 0 partition.
 * **RAM Footprint**: 59,202 B / 65,536 B (90.34%). 6,334 bytes free RAM. Dynamic stack guard protection via ARM Cortex-M4 MPU.
-* **MCUboot Signed Image**: `zephyr.signed.bin` (215,524 bytes), SHA-256: `fca19564fcff9097f42966f52f0ffa5fc942aed9a41d9cb66fe158e23659102e`.
-* **Version String Broadcast**: `"VER:V0.8"` in `ble_backend.c`.
+* **MCUboot Signed Image**: `zephyr.signed.bin` (215,788 bytes).
+* **Version String Broadcast**: `"VER:V1"` in `ble_backend.c`.
 * **Stack Allocations**:
   - `CONFIG_MAIN_STACK_SIZE=2048`
   - `CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE=2048`
@@ -131,54 +131,85 @@ $$\text{MCU GPIO (P0.07)} \rightarrow \text{Wire 2} \rightarrow \text{Solder Joi
 
 1. **Auto-Switch to Channel 0 (230V Range)**:
    - Before taking any measurements, the MUX is automatically set to Channel 0 (`range_set(0)`).
-   - *Industrial Rationale*: Channel 0 provides standard input impedance that naturally attenuates high-impedance stray PCB capacitive coupling from 64–81 mV down to 16 mV when Wire 2 is open-circuit, creating a massive **$13.3\times$ physical signal separation**.
+   - *Industrial Rationale*: Channel 0 provides standard input impedance that naturally attenuates high-impedance stray PCB capacitive coupling, creating massive physical signal separation.
    - Background ADC acquisitions are paused (`g_selftest_active = true`).
 
-2. **Phase 1: Baseline Ambient Capture (Drive Disabled)**:
+2. **Phase 1: Baseline Ambient Capture (8 Cycles / 160 ms)**:
    - Pin P0.07 configured as `GPIO_INPUT` (floating High-Z / tri-state).
-   - Samples 2 cycles (400 samples at 10 kHz, 40 ms total).
+   - Samples 8 full cycles (1600 samples at 10 kHz, 160 ms total, matching `ADC_AVG_COUNT = 8`).
    - Computes quiescent ambient baseline using dual Goertzel:
-     - 50 Hz Grid Ambient (`avg_base_50hz_blc`): $2\text{ to }4\text{ mV}$.
-     - 100 Hz Lock-In Quiescent Floor (`avg_base_100hz_blc`): $1\text{ to }2\text{ mV}$.
-     - Time-domain ambient: `avg_base_p2p_blc` ($2\text{ to }4\text{ mV}$) and `avg_base_p2p_alc` (~2 mV).
-   - *Ambient Safety Inhibit*: Rejects test if ambient 50 Hz electric field is excessive ($> 60\text{ mV}$ P2P or $> 25\text{ mV}$ RMS) to prevent unsafe false passes near live equipment.
+     - 50 Hz Grid Ambient (`avg_base_50hz_blc`).
+     - 100 Hz Lock-In Quiescent Floor (`avg_base_100hz_blc`, `avg_base_100hz_alc`).
+     - Time-domain ambient: `avg_base_rms_blc`, `avg_base_p2p_blc`, `avg_base_rms_alc`.
+   - **Single Unified Ambient Inhibitor**:
+     - Evaluates: `rule_ambient_safe = (avg_base_rms_blc <= 40)`.
+     - *Why 40 mV RMS*: Directly on an insulated 230V utility cable, ambient baseline is ~27 mV RMS. Setting the threshold at 40 mV RMS naturally permits testing near domestic 230V cables without triggering false alarms, while firmly halting the test under hazardous high-voltage fields (>40 mV RMS) with `status_code = 2` (**`Near AC Line`**).
+     - Completely eliminates fragile baseline P2P checks and secondary exception logic.
 
-3. **Phase 2: Active 100 Hz Step Injection & Digital Lock-In Detection**:
+3. **Phase 2: Active 100 Hz Step Injection & Digital Lock-In Detection (8 Cycles / 160 ms)**:
    - Pin P0.07 configured as Output, toggled at 100 Hz (every 5 ms) via `selftest_timer`.
-   - Fast step transitions ($t_r < 10\text{ ns}$) inject high-frequency displacement current:
+   - Fast step transitions ($t_r < 10\text{ ns}$) inject capacitive displacement current:
      $$I_{\text{inj}} = C_{\text{iso}} \frac{dV}{dt}$$
-   - Samples 4 cycles (800 samples, `SELFTEST_CYCLE_COUNT 4`) on BLC (`AIN7`) and ALC (`AIN4`).
-   - Digital lock-in Goertzel filter ($k = 2.0$ for 200 samples @ 10 kHz) extracts pure 100 Hz fundamental:
-     - Orthogonal to 50 Hz power grid ambient noise ($\int \sin(100\pi t) \sin(200\pi t) dt = 0$).
-     - Rejects DC offset and preamp bias drift completely.
-   - Waveforms are immediately copied into published buffers *before* restoring MUX and clearing `g_selftest_active` to prevent any SAADC DMA overwriting.
+   - Samples 8 cycles (1600 samples, `SELFTEST_CYCLE_COUNT 8`) on both BLC (`AIN7`) and ALC (`AIN4`).
+   - Digital lock-in Goertzel filter ($k = 2.0$ for 200 samples @ 10 kHz) extracts pure 100 Hz fundamental on **both** channels:
+     $$\Delta 100\text{Hz}_{\text{BLC}} = \text{Active } 100\text{Hz}_{\text{BLC}} - \text{Base } 100\text{Hz}_{\text{BLC}}$$
+     $$\Delta 100\text{Hz}_{\text{ALC}} = \text{Active } 100\text{Hz}_{\text{ALC}} - \text{Base } 100\text{Hz}_{\text{ALC}}$$
+   - Completely ignores 50 Hz grid electricity because 100 Hz and 50 Hz are orthogonal in Fourier space.
+   - Waveforms are immediately snapshot under mutex *before* restoring MUX and clearing `g_selftest_active` to prevent SAADC DMA corruption.
    - Pin P0.07 is returned to safe `GPIO_INPUT` (High-Z).
 
-4. **Phase 3: Coincident Dual-Channel & 100 Hz Lock-In Evaluation Suite**:
+4. **Phase 3: The 5 Refactored Safety Rules & Result Classification**:
 
-   | Rule | Evaluated Metric | Acceptance Range | Connected (Pass) | Disconnected (Fail) | Purpose & Failure Mode Prevented |
+   | Rule | Evaluated Metric | Acceptance Range | Connected (Pass) | Disconnected (Fail) | Purpose & Physical Failure Mode Prevented |
    | :--- | :--- | :--- | :---: | :---: | :--- |
-   | **Rule 1** | **BLC Injected Delta & Floor** | $\Delta\text{P2P}\ge 110\text{ mV} \land \text{P2P}\ge 130\text{ mV}$ | **$\Delta\approx +212\text{ mV}, \text{P2P}\approx 214\text{ mV}$** | **$\Delta\le +73\text{ mV}, \text{P2P}\le 77\text{ mV}$** | Net differential delta ($\text{Active} - \text{Baseline}$) cancels ambient common-mode EMI noise. True charge injection through Wire 2 $\rightarrow$ Plate $\rightarrow$ Wire 1. Massive 92 mV safety headroom. |
-   | **Rule 2** | **ALC Filtered Output & Delta** | $(\text{RMS}\ge 12 \lor \text{P2P}\ge 20) \land \Delta\text{ALC}\ge 8$ | **$\text{RMS}\approx 36\text{ mV}, \text{P2P}\approx 90\text{ mV}$** | **$\text{RMS}\le 2\text{ mV}, \text{P2P}\le 4\text{ mV}$** | Hardware RC low-pass filter ($220\,\Omega, 10\,\mu\text{F}$) completely wipes out narrow spikes. **$>18\times$ physical signal separation**. |
-   | **Rule 3** | **Dual-Channel Ratio** | $8\% \le \frac{\text{ALC}}{\text{BLC}} \le 75\%$ | **$42\%\text{ to }48\%$** | **$2.4\%\text{ to }4.5\%$** | Rejects narrow stray PCB needle spikes ($<8\%$). Upper bound relaxed to 75% so strong capacitive coupling through 2.2 nF never false-fails. |
-   | **Rule 4** | **100 Hz Lock-In Fundamental** | $\Delta 100\text{Hz} \ge 20\text{ mV} \lor (\text{BLC}\ge 130 \land \text{ALC}\ge 15)$ | **$\Delta 100\text{Hz} \approx 70\text{--}95\text{ mV}$** | **$\Delta 100\text{Hz} \le 4\text{ mV}$** | Phase-invariant quadrature lock-in detector rejecting 50 Hz grid fields and rejecting impulse spikes ($>17\times$ dynamic separation). |
-   | **Rule 5** | **Preamp DC Bias** | $800\text{ mV} \le V_{\text{DC}} \le 2500\text{ mV}$ | **$\approx 1627\text{ mV}$** | $<800\text{ mV}$ or $>2500\text{ mV}$ | Validates MCP601 virtual ground health against ESD damage or trace fracture, tolerant of 2.2 nF transient offset. |
-   | **Inhibit** | **Ambient Noise Floor** | $\le 60\text{ mV}$ P2P & $\le 25\text{ mV}$ RMS | **$2\text{ to }3\text{ mV}$** | **$2\text{ to }3\text{ mV}$** | Prevents false passes caused by testing near an energized 50 Hz utility grid. |
+   | **Rule 1** | **BLC 100 Hz Lock-In** | $\Delta 100\text{Hz}_{\text{BLC}} \ge 15\text{ mV}$ | **$+50\text{ to }+70\text{ mV}$** | **$\le 4\text{ mV}$** | Validates physical continuity through Wire 2 $\rightarrow$ Plate $\rightarrow$ Wire 1 $\rightarrow$ Op-Amp. Immune to 50 Hz power line hum ($>15\times$ dynamic separation). |
+   | **Rule 2** | **ALC 100 Hz Lock-In** | $\Delta 100\text{Hz}_{\text{ALC}} \ge 6\text{ mV}$ | **$+15\text{ to }+30\text{ mV}$** | **$\le 1\text{ mV}$** | Uses pure 100 Hz Goertzel on the filtered channel. Proves wide square-wave energy passes through the internal RC filter on PCB. Zero 50 Hz leakage. |
+   | **Rule 3** | **Op-Amp DC Virtual Ground** | $1000\text{ mV} \le V_{\text{bias}} \le 2200\text{ mV}$ | **$\sim 1625\text{--}1640\text{ mV}$** | $<800\text{ mV}$ or $>2500\text{ mV}$ | Confirms MCP601 op-amp and bias resistors are healthy and not shorted to ground or battery power. |
+   | **Rule 4** | **Dynamic Non-Saturation** | $\text{Active P2P} < 2500\text{ mV}$ | **$210\text{--}290\text{ mV}$** | Rail saturated | Confirms amplifier is operating linearly without clipping the supply rails. |
+   | **Rule 5** | **Broad Pulse Presence** | $\Delta\text{P2P} \ge 25\text{ mV} \lor \text{P2P} \ge 50\text{ mV}$ | **$\Delta\approx 120\text{--}200\text{ mV}$** | $\Delta\le 10\text{ mV}$ | Soft sanity check confirming visible step edge above noise floor. |
+   | **Inhibit** | **Ambient Noise Floor** | $\text{Baseline RMS} \le 40\text{ mV}$ | **$3\text{--}8\text{ mV}$ (Air) / $27\text{ mV}$ (230V)** | $>40\text{ mV}$ | Blocks testing inside dangerous high-voltage fields. Safely passes 230V cables. |
+
+   **Telemetry Diagnostic Status Codes**:
+   * `status_code = 1` $\rightarrow$ **`Passed`**: All 5 rules met and noise is safe. Sensor loop verified.
+   * `status_code = 2` $\rightarrow$ **`Near AC Line`**: Ambient AC noise is too strong ($>40\text{ mV RMS}$). Move into open air.
+   * `status_code = 3` $\rightarrow$ **`Hardware Damaged`**: Preamp DC bias collapsed outside 1000–2200 mV. Internal chip failure.
+   * `status_code = 0` $\rightarrow$ **`Sensor Damaged`**: Wire 2 or sensing plate disconnected (100 Hz pulse missing).
 
 ### C. Empirical Bench Data Summary (Physical Device Test Photos - 2.2 nF Circuit)
 
-| Metric | Wire 2 CONNECTED (Intact) | Wire 2 DISCONNECTED (Open) | Margin / Separation |
-| :--- | :---: | :---: | :---: |
-| **BLC Amplitude (P2P)** | **$211\text{ to }216\text{ mV}$** | **$64\text{ to }81\text{ mV}$** | **$+72\text{ mV}$ vs $-59\text{ mV}$** (relative to 140 mV threshold) |
-| **ALC Filtered Output (P2P)** | **$36\text{ to }37\text{ mV}$** | **$2\text{ mV}$** | **$>18\times$ Physical Contrast** (37 mV vs 2 mV) |
-| **Injected ALC Delta ($\Delta\text{ALC}$)** | **$+34\text{ to }+35\text{ mV}$** | **$0\text{ to }+1\text{ mV}$** | **$>30\times$ Contrast** |
-| **100 Hz Lock-In Delta ($\Delta 100\text{Hz}$)** | **$+70\text{ to }+95\text{ mV}$** | **$\le 4\text{ mV}$** | **$>17\times$ SNR Separation** |
-| **ALC / BLC Attenuation Ratio** | **$16.8\%\text{ to }17.5\%$** | **$2.4\%\text{ to }4.5\%$** | **$>4\times$ Contrast** (17% vs 2.4%) |
-| **Injected Delta ($\Delta\text{P2P}$)** | **$+192\text{ to }+196\text{ mV}$** | **$+64\text{ mV}$** | **$3\times$ Separation** |
-| **Evaluation Result** | **PASS (All Rules OK)** | **FAIL (Rules 1, 2, 3, 4 Fail)** | **Zero False Results** |
+| Metric | Wire 2 CONNECTED (Air) | Wire 2 CONNECTED (230V Cable) | Wire 2 DISCONNECTED (Open) | Margin / Separation |
+| :--- | :---: | :---: | :---: | :---: |
+| **Baseline Ambient RMS** | **$4\text{ to }7\text{ mV}$** | **$27\text{ mV}$** | **$4\text{ mV}$** | Below 40 mV Inhibitor |
+| **Active P2P** | **$211\text{ to }216\text{ mV}$** | **$292\text{ mV}$** | **$34\text{ mV}$** | $>6\times$ Separation |
+| **Injected Delta ($\Delta\text{P2P}$)** | **$+192\text{ to }+196\text{ mV}$** | **$+123\text{ mV}$** | **$+6\text{ mV}$** | $>20\times$ Separation |
+| **Filtered ALC RMS** | **$34\text{ to }37\text{ mV}$** | **$40\text{ mV}$** | **$2\text{ mV}$** | $>18\times$ Physical Contrast |
+| **100 Hz Lock-In Delta ($\Delta 100\text{Hz}$)** | **$+70\text{ to }+95\text{ mV}$** | **$+62\text{ mV}$** | **$\le 3\text{ mV}$** | $>20\times$ SNR Separation |
+| **Preamp DC Virtual Ground** | **$1627\text{ mV}$** | **$1625\text{ mV}$** | **$1628\text{ mV}$** | Clean nominal $V_{DD}/2$ |
+| **Evaluation Result** | **PASS** | **PASS** | **FAIL (Sensor Damaged)** | **Zero False Results** |
 
-### D. Power-On Boot Kelvin Self-Test Integration
-- Runs cleanly inside `adc_thread_fn` on the first steady-state cycle (`count == ADC_AVG_COUNT`, ~80 ms after boot) after the SAADC driver and power rails are fully settled.
+### D. Empirical 230V Utility Line Calibration Baseline (CPRI Reference Benchmark)
+
+From live field testing on a single-phase 230V utility line (Manikonda, India):
+* **BLC (Core Antenna)**:
+  - DC Bias: $1639\text{ mV}$
+  - True RMS: $27\text{ mV}$
+  - Peak-to-Peak: $129\text{ mV}$
+  - Dominant Frequency: $50.0\text{ Hz}$ (50 Hz FFT Mag = 2460 counts)
+  - Total Harmonic Distortion (THD): $125.12\%$ (Rich unshielded electrostatic harmonics)
+* **ALC (After Filter)**:
+  - DC Bias: $1641\text{ mV}$
+  - True RMS: $11\text{ mV}$
+  - Peak-to-Peak: $47\text{ mV}$
+  - Dominant Frequency: $50.0\text{ Hz}$ (50 Hz FFT Mag = 1616 counts)
+  - Total Harmonic Distortion (THD): $29.75\%$ (Analog filter effectively eliminates high-order distortion)
+* **Recommended Flash Calibration Values (Channel 0 / 230V)**:
+  - `BLC RMS Min = 15 mV` (Live threshold: mid-point between $7\text{ mV}$ quiet air and $27\text{ mV}$ live cable)
+  - `ALC RMS Min = 7 mV` (Live threshold: mid-point between $2\text{ mV}$ quiet air and $11\text{ mV}$ live cable)
+  - `BLC/ALC Mean Min = 1100 mV`, `Mean Max = 2200 mV` (DC bias safe window)
+  - `BLC RMS Max = 800 mV`, `ALC RMS Max = 500 mV` (Saturation protection)
+
+### E. Power-On Boot Kelvin Self-Test Integration
+- Runs cleanly inside `adc_thread_fn` on the first steady-state cycle (`count == ADC_AVG_COUNT`, ~160 ms after boot) after the SAADC driver and power rails are fully settled.
 - `adc_thread` stack expanded to **3072 bytes** with Cortex-M4 MPU hardware stack protection (`CONFIG_MPU_STACK_GUARD=y`).
 - Replaced floating-point library `sqrt` with non-recursive 64-bit integer `isqrt64()`, eliminating software float stack frames and preventing MPU guard faults during MCUboot image verification.
 - Single retry mechanism before locking into `STATUS_FAULT`.
@@ -315,12 +346,42 @@ Because the detector uses fixed-gain attenuators switched by the CD74HC4067 16-c
   - `PKT_STATS_1` (Type 4, 16 Bytes): `status`, `battery_percent`, `reserved`, `battery_mv`, `blc_mean_mV`, `blc_rms_mV`.
   - `PKT_STATS_2` (Type 5, 10 Bytes): `alc_mean_mV`, `alc_rms_mV`, `selected_range`.
   - `PKT_BLC` / `PKT_ALC` (Types 1 & 2): Raw 200-point waveform buffers streamed for real-time oscillograms.
-  - `PKT_SELFTEST_ACK` (16 Bytes): Real-time `delta_p2p_mv`, `passed` boolean, and DC bias diagnostics streamed upon `'K'` command.
+  - `PKT_SELFTEST_ACK` (Type 'K', 20 Bytes): Diagnostic ACK carrying `status_code`, active/base/delta RMS, active/delta P2P, ALC RMS, BLC $\Delta 100\text{Hz}$, and DC bias.
+* **UI Component Architecture**:
+  - `IndicatorPanel.tsx`: High-contrast industrial instrument panel with matched twin action pills (`Self-Test` and `Disconnect`), centered hero state banner, and fixed 3-column safety footer (`SELECTED RANGE`, `NOMINAL VOLTAGE`, `SAFE DISTANCE`).
+  - `SelfTestModal.tsx`: Sleek dark theme (`#161B26`), single 1-line clear result banner (`Passed` in green, or `Failed` with 1-line cause: `Near AC Line`, `Sensor Damaged`, `Hardware Damaged`), collapsible down-arrow drawer revealing the digital oscilloscope and differential parameters, and context-aware `Continuity Loop Status` (`INTACT & SAFE`, `INHIBITED (AC NOISE)`, `CIRCUIT FAULT`, `DISCONNECTED`).
+  - `ThresholdSettings.tsx`: Calibration modal allowing immediate RAM adjustments and permanent flash storage for all 16 channels.
+  - `FaultAlertModal.tsx`: Neutralized and removed from main tabs to avoid duplicate/unwanted blocking dialogs.
 * **Non-Blocking BLE Streaming**: Self-test execution is offloaded from GATT write callbacks to a dedicated background thread (`ble_tx_thread_fn`) via `k_sem_give(&ble_tx_sem)`, preventing GATT timeouts during the acquisition window.
 
 ---
 
 ## 12. Engineering Update History & Architectural Changelog
+
+### 2026-11-02: 8-Cycle 100 Hz Lock-In Engine, Single 40 mV RMS Inhibitor, Live 230V Calibration Baseline & Dark UI
+* **Subsystem Scope**: Digital Signal Processing (`adc_backend.c`, `adc_backend.h`), BLE Protocol (`ble_backend.c`), Mobile App (`SelfTestModal.tsx`, `IndicatorPanel.tsx`, `useBLE.ts`), OTA & Diagnostic Suite (`ota_update.py`, `test_device.py`), System Documentation (`DEV.md`).
+* **Technical Description**:
+  * **8-Cycle Signal Averaging & Noise Filtering**:
+    - Increased both Phase 1 (Baseline) and Phase 2 (100 Hz Injection) to 8 full cycles (`SELFTEST_CYCLE_COUNT = 8`, 160 ms each), perfectly matching `ADC_AVG_COUNT = 8` in the main detection loop.
+    - Improved signal-to-noise ratio (SNR) by $\sim 2.8\times$ ($\sqrt{8}$ averaging), eliminating vulnerability to single-sample static glitches or line flutter.
+  * **Single Unified Ambient Inhibitor (40 mV RMS)**:
+    - Replaced the overly tight 25 mV RMS / 60 mV P2P dual inhibitor with a single, rock-solid rule: `avg_base_rms_blc <= 40 mV`.
+    - Removed baseline P2P checks (which were sensitive to single-point transients) and removed secondary override exceptions.
+    - Allows the self-test to run cleanly directly on or near a 230V utility cable (~27 mV RMS) without false fails, while firmly blocking tests under dangerous high-voltage fields (>40 mV RMS) with `status_code = 2` (**`Near AC Line`**).
+  * **Dual-Channel 100 Hz Lock-In (BLC + ALC)**:
+    - Both BLC and ALC channels now evaluate pure 100 Hz fundamental energy via digital Goertzel filters:
+      - Rule 1 (BLC): $\Delta 100\text{Hz}_{\text{BLC}} \ge 15\text{ mV}$ (Intact: $+50\text{--}70\text{ mV}$, Broken: $\le 4\text{ mV}$).
+      - Rule 2 (ALC): $\Delta 100\text{Hz}_{\text{ALC}} \ge 6\text{ mV}$ (Intact: $+15\text{--}30\text{ mV}$, Broken: $\le 1\text{ mV}$).
+    - Because 100 Hz is orthogonal to 50 Hz, outside power grid hum cannot cause false passes on a broken wire.
+  * **20-Byte BLE ACK Packet ('K')**:
+    - Updated packet layout to include `ack[1] = res.status_code` (1=Pass, 2=Near AC Line, 3=Hardware Damaged, 0=Sensor Damaged).
+  * **Mobile App Dark Theme & Single-Line Result**:
+    - Transformed `SelfTestModal.tsx` into a dark-themed card (`#161B26`) with a single-line summary, collapsible down-arrow parameter drawer, and context-aware `Continuity Loop Status`.
+    - Redesigned `IndicatorPanel.tsx` with twin action pills and locked 3-column footer.
+  * **Live 230V Calibration Baseline**:
+    - Benchmarked against live 230V utility line: BLC RMS = 27 mV, ALC RMS = 11 mV. Calibrated Channel 0 thresholds to `BLC RMS Min = 15 mV` and `ALC RMS Min = 7 mV`.
+  * **Windows BLE Scanning Unicode Fix**:
+    - Sanitized device name printing with `errors='replace'` in `ota_update.py` and `test_device.py`, preventing Windows charmap crashes from nearby BLE devices with emoji names.
 
 ### 2026-11-01: Coincident Dual-Channel & 100 Hz Lock-In Gating (2.2 nF Circuit), Simplified OTA Verify & System Documentation Merge
 * **Subsystem Scope**: Digital Signal Processing (`adc_backend.c`), BLE Backend (`ble_backend.c`), OTA Script (`ota_update.py`), System Documentation (`DEV.md`).

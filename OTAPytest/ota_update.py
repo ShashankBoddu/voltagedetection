@@ -40,13 +40,17 @@ async def find_device(name):
         print(f"Found {len(devices)} device(s) in range:")
         target_device = None
         for d in devices:
-            d_name = d.name if d.name else "Unknown"
-            print(f"  - {d_name} [{d.address}]")
-            if d.name and d.name.strip() == name:
+            if d.name and (d.name.strip() == name or d.address.upper() == name.upper()):
                 target_device = d
+            clean_name = d.name.encode('ascii', errors='replace').decode('ascii') if d.name else "Unknown"
+            try:
+                print(f"  - {clean_name} [{d.address}]")
+            except Exception:
+                pass
         
         if target_device:
-            print(f"\nTarget device found: {target_device.name} [{target_device.address}]")
+            clean_target_name = target_device.name.encode('ascii', errors='replace').decode('ascii')
+            print(f"\nTarget device found: {clean_target_name} [{target_device.address}]")
             return target_device.address
     except Exception as e:
         print(f"Scan error: {e}")
