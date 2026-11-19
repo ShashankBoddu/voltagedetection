@@ -846,24 +846,15 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
 
       channel_thresholds_t *t = &g_thresholds.channels[ch];
 
-      // 1. Live Thresholds for Range (Configured or Calibrated Defaults)
-      int32_t blc_live_thresh = (t->blc_rms_min > 0) ? t->blc_rms_min : 35;
-      int32_t alc_live_thresh = (t->alc_rms_min > 0) ? t->alc_rms_min : 25;
-      if (ch == 0) {
-        // For Channel 0 (230V Range) on standard / FDM enclosure:
-        // Cap old uncalibrated defaults (35/25) to 15 mV BLC and 10 mV ALC
-        if (blc_live_thresh > 20) {
-          blc_live_thresh = 15;
-        }
-        if (alc_live_thresh > 15) {
-          alc_live_thresh = 10;
-        }
-      }
+      // 1. Live Thresholds for Range (Loaded directly from flash memory / app calibration)
+      int32_t blc_live_thresh = (t->blc_rms_min > 0) ? t->blc_rms_min : 21;
+      int32_t alc_live_thresh = (t->alc_rms_min > 0) ? t->alc_rms_min : 15;
 
       // Method A Continuous Self-Test: Preamplifier DC Bias Health Check
       // Nominal MCP601 DC bias is VDD/2 = ~1650 mV.
-      // Abnormal bias (< 800 mV or > 2400 mV) flags sensor plate disconnect or op-amp ESD failure.
-      bool hw_fault = (g_data.blc_mean_mv < 800 || g_data.blc_mean_mv > 2400) || g_kelvin_hardware_failed;
+      // Abnormal bias (< 800 mV or > 2400 mV) flags sensor plate disconnect or op-amp ESD failure,
+      // but only if there is not an extreme AC voltage causing diode rail clamping (alc_rms_mv < 100).
+      bool hw_fault = ((g_data.blc_mean_mv < 800 || g_data.blc_mean_mv > 2400) && (g_data.alc_rms_mv < 100)) || g_kelvin_hardware_failed;
 
       // Compute 150 Hz 3rd-Harmonic Distortion Ratio on BLC core antenna
       int32_t blc_150hz_pct = (g_data.blc_rms_mv > 0) ?
@@ -874,11 +865,9 @@ void adc_thread_fn(void *arg1, void *arg2, void *arg3) {
                               ((alc_150hz_rms_mv * 100) / g_data.alc_rms_mv) : 0;
 
       // SMPS Charger Cable vs. 230V Utility Grid Discrimination:
-      // 1. Genuine 230V utility grid lines (clean 50Hz sine wave):
-      //    The active analog filter wipes out 150Hz on ALC completely (alc_150hz_pct < 8%).
-      // 2. A floating phone charger DC cable carries intense common-mode rectifier pulses:
-      //    150Hz harmonic is dominant on BLC (>= 150%) OR leaks heavily through the filter into ALC (alc_150hz_pct >= 15%).
-      bool is_smps_charger = (blc_150hz_pct >= 150) || (alc_150hz_pct >= 15);
+      // STRICTLY RESTRICTED TO CHANNEL 0 (230V Mains). Phone chargers only exist at low-voltage domestic outlets.
+      // High-voltage transmission lines (Ch 1 - Ch 11) frequently carry corona / transformer harmonics and must NEVER be suppressed!
+      bool is_smps_charger = (ch == 0) && ((blc_150hz_pct >= 150) || (alc_150hz_pct >= 15));
 
       uint8_t status = STATUS_SAFE;
       if (hw_fault) {
